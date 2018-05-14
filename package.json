@@ -1,6 +1,6 @@
 {
   "name": "eddn-client",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "simple eddn client",
   "main": "eddn.js",
   "dependencies": {

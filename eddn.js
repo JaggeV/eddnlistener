@@ -1,3 +1,4 @@
+var VERSION = '0.0.1';
 var zmq     = require('zmq')
   , sock    = zmq.socket('sub')
   , zlib    = require('zlib')
@@ -7,6 +8,7 @@ var zmq     = require('zmq')
   , url     = require('url')
   , stream  = require('stream')
 ;
+console.log('Starting eddn listener/web server v.' + VERSION);
 // these next variables can be used to tune item price checks
 const TOP_LIMIT = 1500; //% how many percents sell/buy price can be higher than mean price
 const BOT_LIMIT = 1500; //% how many percents can sell/buy price be lower than mean price 
@@ -240,7 +242,8 @@ function useSchema(rawJson, schema, header, data, comJson) {
     var time = new Date(Date.parse(data.timestamp));
     //id,station_id,commodity_id,supply,supply_bracket,buy_price,sell_price,demand,demand_bracket,collected_at
     //id is not needed by Trade Dangerous or is set by it. Thus leave it empty.
-    var cvsString=''; 
+    var cvsString='id,station_id,commodity_id,supply,supply_bracket,buy_price,' +
+            'sell_price,demand,demand_bracket,collected_at\n'; 
     for(var i=0; i < len; i++){
         var top = TOP_LIMIT/100 * data.commodities[i].meanPrice + data.commodities[i].meanPrice;
         var bot = data.commodities[i].meanPrice - BOT_LIMIT/100 * data.commodities[i].meanPrice;
@@ -267,9 +270,6 @@ function useSchema(rawJson, schema, header, data, comJson) {
                 cvsString += ',';
                 cvsString += data.marketId + ',';
                 cvsString += comJson[j].id + ',';
-//                cvsString += comJson[j].ed_id + ',';
-
-//                cvsString += data.commodities[i].commodityId + ',';
                 cvsString += data.commodities[i].stock + ',';
                 cvsString += data.commodities[i].stockBracket + ',';
                 cvsString += data.commodities[i].buyPrice + ',';
@@ -356,7 +356,12 @@ function downloadPage(res, dataArray, dataType) {
     console.log('streaming data...' + dataArray.length);
     if(dataType === 'json') {
         ss.push('[');
-        dataArray.forEach(item => ss.push(JSON.stringify(item[1])));
+        for(var i = 0; i < dataArray.length; i++) {
+            if(i < dataArray.length - 1)
+                ss.push(JSON.stringify(dataArray[i][1]) + ',');
+            else
+                ss.push(JSON.stringify(dataArray[i][1])); //during last round, don't add , to end
+        }
         ss.push(']');
     }
     else if(dataType === 'csv') {
