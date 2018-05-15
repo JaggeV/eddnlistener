@@ -1,4 +1,4 @@
-var VERSION = '0.0.1';
+var VERSION = '0.0.2';
 var zmq     = require('zmq')
   , sock    = zmq.socket('sub')
   , zlib    = require('zlib')
@@ -242,8 +242,7 @@ function useSchema(rawJson, schema, header, data, comJson) {
     var time = new Date(Date.parse(data.timestamp));
     //id,station_id,commodity_id,supply,supply_bracket,buy_price,sell_price,demand,demand_bracket,collected_at
     //id is not needed by Trade Dangerous or is set by it. Thus leave it empty.
-    var cvsString='id,station_id,commodity_id,supply,supply_bracket,buy_price,' +
-            'sell_price,demand,demand_bracket,collected_at\n'; 
+    var cvsString=''; 
     for(var i=0; i < len; i++){
         var top = TOP_LIMIT/100 * data.commodities[i].meanPrice + data.commodities[i].meanPrice;
         var bot = data.commodities[i].meanPrice - BOT_LIMIT/100 * data.commodities[i].meanPrice;
@@ -365,6 +364,7 @@ function downloadPage(res, dataArray, dataType) {
         ss.push(']');
     }
     else if(dataType === 'csv') {
+        ss.push('id,station_id,commodity_id,supply,supply_bracket,buy_price, sell_price,demand,demand_bracket,collected_at\n');
         dataArray.forEach(item => ss.push(item[2]));
     }
     ss.push(null); // end of data
