@@ -1,4 +1,4 @@
-var VERSION = '0.0.2';
+var VERSION = '0.0.3';
 var zmq     = require('zmq')
   , sock    = zmq.socket('sub')
   , zlib    = require('zlib')
@@ -7,8 +7,11 @@ var zmq     = require('zmq')
   , https   = require('https')
   , url     = require('url')
   , stream  = require('stream')
+  , LOG     = require('winston').log
 ;
-console.log('Starting eddn listener/web server v.' + VERSION);
+// set logging level: error, warning, info, verbose, debug, silly
+LOG.level='info';
+LOG('info', 'Starting eddn listener/web server v.' + VERSION);
 // these next variables can be used to tune item price checks
 const TOP_LIMIT = 1500; //% how many percents sell/buy price can be higher than mean price
 const BOT_LIMIT = 1500; //% how many percents can sell/buy price be lower than mean price 
@@ -18,9 +21,6 @@ const BOT_LIMIT = 1500; //% how many percents can sell/buy price be lower than m
 // any other (web)service running in that port. E.g. localhost:1185/elite or if port 80,
 // then just localhost/elite to access your server
 const PORT = 1185; 
-
-// log level, the higher the number, the more verbose the logs will be
-var DEBUG=2;
 
 //how long same commodities file is used before new one is downloaded
 //commodities file is used to obtain info about commodity ids.
@@ -33,6 +33,9 @@ var jsons = new Array(); // this variable will store all the received eddn jsons
 var schema1 = null;
 var schema3 = null;
 
+// counter for how many times we have sent 3hdata to those who have asked
+var reqCount = 0;
+
 var commodities = {time : '', data : ''};
 
 getCommodities(); //if this fails totally, you can download commodities.json
@@ -42,7 +45,7 @@ getCommodities(); //if this fails totally, you can download commodities.json
 // to force update, just delete commodity.json before running eddn.js
 const intervalObj = setInterval(updateCommodities, COMSEXPIRE);
 
-console.log('Creating web server');
+LOG('info', 'Creating web server');
 var server = http.createServer(function (req, res) {
     if (req.method.toLowerCase() == 'get') {
         var u = url.parse(req.url).pathname;
@@ -70,7 +73,7 @@ var server = http.createServer(function (req, res) {
 
 sock.connect('tcp://eddn.edcd.io:9500');
 sock.subscribe('');
-console.log('waiting for updates...');
+LOG('info', 'waiting for updates...');
 sock.on('message', function(message) {
     zlib.inflate(message, function(err, chunk) {
         var payload   = JSON.parse(chunk.toString('utf8'))
@@ -93,13 +96,16 @@ sock.on('message', function(message) {
                 useSchema(payload, schema3, header, data, commodities.data);
         }
         else {
-            // console.log('unsupported schema in json "%s"', schemaRef); 
+            LOG('debug', 'unsupported schema in json "%s"', schemaRef); 
             return;
         }
     });
 });
-server.listen(PORT);
-console.log("server listening on " + PORT);
+server.listen(PORT).on('error', error => {
+    LOG('error', 'Port ' + PORT +' is already in use, maybe eddm is running?');
+    process.exit(1);
+});
+LOG('info', "server listening on " + PORT);
 
 // This will download schema file from eddn.io website, then the schema
 // will be used to validate all downloaded data.
@@ -123,11 +129,13 @@ function downloadSchema(schemaUrl, rawJson, header, data) {
                 useSchema(rawJson, schema, header, data, commodities.data);
             });
             response.on('error', function() {
-                console.log("Failed to download schema from " + schemaUrl);
+                LOG('error', "Failed to download schema from " + schemaUrl);
             });
         }
-        else
-            console.log('Schema url returned bad response ' + response.statusCode);                   
+        else {
+            LOG('error', 'Schema url returned bad response ' +
+                response.statusCode);
+        }
     });
 }
 
@@ -143,12 +151,12 @@ function getCommodities() {
         var fInfo = fs.statSync(COMFILE);
         var now = new Date();
         var fileDate = new Date(fInfo.mtime);
-        console.log('commodities.json age: ' + fileDate);
+        LOG('verbose', 'commodities.json age: ' + fileDate);
         if(now - fileDate < COMSEXPIRE) {//time diff is in milliseconds
-            console.log('Using existing commodities.json');
+            LOG('info', 'Using existing commodities.json');
             fs.readFile(COMFILE, (err, data) => {
                 if(err) {
-                    console.log('Failed to open ' + COMFILE + 'due to ' + err);
+                    LOG('error', 'Failed to open ' +COMFILE + 'due to ' + err);
                     fs.unlink(COMFILE);
                     getCommodities();
                 }
@@ -165,7 +173,7 @@ function getCommodities() {
     }
     else {
         // file did not exists, thus need to download it
-        console.log(COMFILE + ' did not exist, downloading it');
+        LOG('info', COMFILE + ' did not exist, downloading it');
         const req = https.get(comUrl, function(response) {
             if(response.statusCode === 200) {
                 response.on('data', function(chunk) {
@@ -175,19 +183,22 @@ function getCommodities() {
                     commodities.time = new Date();
                     fs.writeFile(COMFILE, commodities.data, err => {
                         if(err)
-                        console.log('Failed to write ' + COMFILE + ' to drive');
+                            LOG('error', 'Failed to write ' + COMFILE +
+                                ' to drive');
                         else
-                            console.log('Saved ' + COMFILE);
+                            LOG('verbose', 'Saved ' + COMFILE);
                     });
                     commodities.data = JSON.parse(commodities.data);
                     commodities.data = convertCommodities(commodities.data);
                 });
                 response.on('error', function() {
-                    console.log('Failed to download ' + COMFILE + ' from ' + comUrl);
+                    LOG('error', 'Failed to download ' + COMFILE +
+                        ' from ' + comUrl);
                 });
             }
             else
-                console.log(COMFILE + ' url returned bad response ' + response.statusCode);                   
+                LOG('error', COMFILE + ' url returned bad response ' +
+                    response.statusCode);                   
         });
     }
 }
@@ -198,6 +209,7 @@ function updateCommodities() {
     var now = new Date();
     if(now - commodities.time > COMSEXPIRE)
     {
+        LOG('info', COMFILE + ' has expired, downloading new one');
         var fs = require('fs');
         fs.unlink(COMFILE);
         commodities.time = '';
@@ -237,31 +249,49 @@ function useSchema(rawJson, schema, header, data, comJson) {
     if(!validate(rawJson, schema))
         return;
 
-    // data passed schema validation, lets check the values against average prices
+    // data passed schema validation, lets check values against average prices
     var len = Object.keys(data.commodities).length;
     var time = new Date(Date.parse(data.timestamp));
     //id,station_id,commodity_id,supply,supply_bracket,buy_price,sell_price,demand,demand_bracket,collected_at
     //id is not needed by Trade Dangerous or is set by it. Thus leave it empty.
-    var cvsString=''; 
-    for(var i=0; i < len; i++){
-        var top = TOP_LIMIT/100 * data.commodities[i].meanPrice + data.commodities[i].meanPrice;
-        var bot = data.commodities[i].meanPrice - BOT_LIMIT/100 * data.commodities[i].meanPrice;
+    var cvsString='';
+
+    // check that prices are sane
+    // todo: add more intelligent heuristics or automatic logic for checks
+    for(var i = 0; i < len; i++){
+        var top = TOP_LIMIT/100 * data.commodities[i].meanPrice +
+                data.commodities[i].meanPrice;
+        var bot = data.commodities[i].meanPrice - BOT_LIMIT/100 *
+                data.commodities[i].meanPrice;
         if(bot < 0) bot = 0;
         
         if(data.commodities[i].buyPrice > 0 && (
-             data.commodities[i].buyPrice > top ||
-             data.commodities[i].buyPrice < bot) ||
+            data.commodities[i].buyPrice > top ||
+                data.commodities[i].buyPrice < bot ) ||
            data.commodities[i].sellPrice > 0 && (
-             data.commodities[i].sellPrice > top ||
+               data.commodities[i].sellPrice > top ||
                    data.commodities[i].sellPrice < bot)) {
-            console.log(data.commodities[i].name + ' avg:' + data.commodities[i].meanPrice + ' t:' +
-                        top + ' b:' +
-                        bot + ' buy:' +
-                        data.commodities[i].buyPrice + ' sell:' + data.commodities[i].sellPrice);      
-            console.log("json price exceed limits, ignoring data");
+            LOG('debug', data.commodities[i].name + ' avg:' +
+                data.commodities[i].meanPrice + ' t:' +
+                top + ' b:' +
+                bot + ' buy:' +
+                data.commodities[i].buyPrice + ' sell:' +
+                        data.commodities[i].sellPrice);      
+            LOG('warning', 'json price exceed limits, ignoring data');
             return;
         }
-        // price was ok, lets find a match from commodities.json
+        // price was ok, lets check the other fields also
+        if(data.marketId === undefined) {
+            LOG('warning', 'marketId undefined, ignoring data');
+            return;
+        }
+        if(data.commodities[i].stock === undefined ||
+           data.commodities[i].stockBracket === undefined ||
+           data.commodities[i].demand === undefined ||
+           data.commodities[i].demandBracket === undefined) {
+            LOG('warning', 'Stock or demand info undefined');
+        }
+        // all field are at least set,  lets find a match from commodities.json
         var found=false;
         for(var j = 0; j < comJson.length; j++)
         {
@@ -281,50 +311,49 @@ function useSchema(rawJson, schema, header, data, comJson) {
             }
         }
         if(!found)
-            console.log('looking for: ' + data.commodities[i].name +
-                        ' no match found');
+            LOG('warning', 'looking for: ' + data.commodities[i].name +
+                ' no match found');
     }
-//    console.log('cvs: ' + cvsString);
-    console.log('%s-%s - System: %s[%s] commodities: %s',
-                header.gatewayTimestamp, time,
-                data.systemName, data.stationName, len);
+    LOG('debug', 'cvs: ' + cvsString);
+    LOG('debug', '%s-%s - System: %s[%s] commodities: %s',
+        header.gatewayTimestamp, time,
+        data.systemName, data.stationName, len);
 
     jsons.push(new Array());
     jsons[jsons.length-1][0]=time.getTime();
     jsons[jsons.length-1][1]=rawJson;
     jsons[jsons.length-1][2]=cvsString;;
-
-    console.log("jsons size %s", jsons.length);
+    
+    LOG('info', "jsons size %s", jsons.length);
     
     // next remove all items older than 3 hours from the array
-    var i = 0;
-    while(jsons[i][0]<Date.now() - 3*60*60*1000)
-        i++;
-    jsons.splice(0,i);
+    var count = 0;
+    while(jsons[count][0]<Date.now() - 3*60*60*1000)
+        count++;
+    jsons.splice(0, count);
     
     // todo: in case of restart, write 3h array to to a file at an hour interval
-    if(DEBUG>3) {
-        console.log('%s - System: %s, Station: %s - MarketId: ',
-                data.timestamp,
-                    data.systemName,
-                    data.stationName,
-                    data.marketId);
-        console.log(sprintf('%-30s %8s    %8s    %6s    %6s', 'NAME', 'STOCK','DEMAND', 'BUY', 'SELL'));
-        var mapping={ 0:'N', 1:'L', 2:'M', 3:'H', '':'N'};
-        for(var i=0; i < len; i++){
-            var d = mapping[data.commodities[i].demandBracket];
-            if(d == null) d='N';
-            console.log(sprintf('%-30s %8s    %8s %s    %6s    %6s %6s',
-                                data.commodities[i].name,
-                                data.commodities[i].stock,
-                                data.commodities[i].demand,
-                                d,
-                                data.commodities[i].buyPrice,
-                                data.commodities[i].sellPrice,
-                                data.commodities[i].meanPrice));
-        }
-    }    
-}
+    
+    LOG('debug', '%s - System: %s, Station: %s - MarketId: ',
+        data.timestamp,
+        data.systemName,
+        data.stationName,
+        data.marketId);
+    LOG('debug', sprintf('%-30s %8s    %8s    %6s    %6s', 'NAME', 'STOCK','DEMAND', 'BUY', 'SELL'));
+    var mapping={ 0:'N', 1:'L', 2:'M', 3:'H', '':'N'};
+    for(var i = 0; i < len; i++){
+        var d = mapping[data.commodities[i].demandBracket];
+        if(d == null) d='N';
+        LOG('debug', sprintf('%-30s %8s    %8s %s    %6s    %6s %6s',
+                             data.commodities[i].name,
+                             data.commodities[i].stock,
+                             data.commodities[i].demand,
+                             d,
+                             data.commodities[i].buyPrice,
+                             data.commodities[i].sellPrice,
+                             data.commodities[i].meanPrice));
+    }
+}    
 
 // This will create the actual download page 3hdata.
 // When user clicks the 3hdata link or uses some other way
@@ -348,11 +377,15 @@ function downloadPage(res, dataArray, dataType) {
     // i.e. create data "[{json1{json2}...{jsonN}] or send the csv data.
     // client then has to unzip the received file.
     ss.pipe(zlib.createGzip())
-        .on('close',() =>console.log('zip done'))
+        .on('close',() =>LOG('verbose', 'zip done'))
         .pipe(res)
-        .on('finish', () => {console.log('Done'); res.end();});
+        .on('finish', () => {LOG('verbose', 'Data sent'); res.end();});
 
-    console.log('streaming data...' + dataArray.length);
+    const ip = res.socket.localAddress;
+    const port = res.socket.localPort;
+    reqCount++;
+    LOG('info', 'Serving ' + dataType +' data items: ' + dataArray.length +
+        ' to address ' + ip + 'request number: ' + reqCount);
     if(dataType === 'json') {
         ss.push('[');
         for(var i = 0; i < dataArray.length; i++) {
@@ -396,6 +429,7 @@ so that your data is constantly up to date</p>');
     res.write('<div class="footer">');
     res.write('  <p>Please feel free to contact me if you need further support or have improvement ideas,\
 jarkko.vartiainen at googles most prominent web mail.com</p>');
+    res.write('<p class="cent" >Eddn listener v.' + VERSION + '</p>');
     res.end();
 }
 
