@@ -1,4 +1,4 @@
-var VERSION = '0.0.3';
+var VERSION = '0.0.4';
 var zmq     = require('zmq')
   , sock    = zmq.socket('sub')
   , zlib    = require('zlib')
@@ -7,10 +7,12 @@ var zmq     = require('zmq')
   , https   = require('https')
   , url     = require('url')
   , stream  = require('stream')
-  , LOG     = require('winston').log
+  , winston = require('winston')
 ;
-// set logging level: error, warning, info, verbose, debug, silly
-LOG.level='info';
+
+var LOG = winston.log;
+
+winston.level='info';
 LOG('info', 'Starting eddn listener/web server v.' + VERSION);
 // these next variables can be used to tune item price checks
 const TOP_LIMIT = 1500; //% how many percents sell/buy price can be higher than mean price
@@ -96,7 +98,7 @@ sock.on('message', function(message) {
                 useSchema(payload, schema3, header, data, commodities.data);
         }
         else {
-            LOG('debug', 'unsupported schema in json "%s"', schemaRef); 
+            LOG('silly', 'unsupported schema in json "%s"', schemaRef); 
             return;
         }
     });
@@ -151,7 +153,7 @@ function getCommodities() {
         var fInfo = fs.statSync(COMFILE);
         var now = new Date();
         var fileDate = new Date(fInfo.mtime);
-        LOG('verbose', 'commodities.json age: ' + fileDate);
+        LOG('debug', 'commodities.json age: ' + fileDate);
         if(now - fileDate < COMSEXPIRE) {//time diff is in milliseconds
             LOG('info', 'Using existing commodities.json');
             fs.readFile(COMFILE, (err, data) => {
@@ -160,6 +162,13 @@ function getCommodities() {
                     fs.unlink(COMFILE);
                     getCommodities();
                 }
+                if(data === 'undefined')
+                {
+                    LOG('warning', 'Commodities data length = 0, downloading new');
+                    fs.unlink(COMFILE);
+                    getCommodities();
+                    return;
+                }     
                 commodities.time = fileDate;
                 commodities.data = JSON.parse(data);
                 commodities.data = convertCommodities(commodities.data);
@@ -324,7 +333,7 @@ function useSchema(rawJson, schema, header, data, comJson) {
     jsons[jsons.length-1][1]=rawJson;
     jsons[jsons.length-1][2]=cvsString;;
     
-    LOG('info', "jsons size %s", jsons.length);
+    LOG('debug', "jsons size %s", jsons.length);
     
     // next remove all items older than 3 hours from the array
     var count = 0;
