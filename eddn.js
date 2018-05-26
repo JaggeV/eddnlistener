@@ -1,35 +1,49 @@
-var VERSION = '0.0.4';
-var zmq     = require('zmq')
-  , sock    = zmq.socket('sub')
-  , zlib    = require('zlib')
-  , sprintf = require("sprintf-js").sprintf
-  , http    = require('http')
-  , https   = require('https')
-  , url     = require('url')
-  , stream  = require('stream')
-  , winston = require('winston')
+var VERSION  = '0.0.4';
+var zmq      = require('zmq')
+  , sock     = zmq.socket('sub')
+  , zlib     = require('zlib')
+  , sprintf  = require("sprintf-js").sprintf
+  , http     = require('http')
+  , https    = require('https')
+  , url      = require('url')
+  , stream   = require('stream')
+  , winston  = require('winston')
+  , lineFilt = require('./lineedit.js')
 ;
 
+//var logger = new (winston.Logger)({
+winston.configure({
+    transports: [
+        new (winston.transports.Console)({level:'info', colorize: true}),
+        new (winston.transports.File)({
+            Filename: 'eddn.log',
+            dirname: __dirname,
+            level: 'verbose',
+            maxsize: 10000000,
+            maxFiles: 3
+        })
+    ]
+});
 var LOG = winston.log;
+//var LOG = logger.log;
 
-winston.level='info';
 LOG('info', 'Starting eddn listener/web server v.' + VERSION);
 // these next variables can be used to tune item price checks
 const TOP_LIMIT = 1500; //% how many percents sell/buy price can be higher than mean price
-const BOT_LIMIT = 1500; //% how many percents can sell/buy price be lower than mean price 
+const BOT_LIMIT = 1500; //% how many percents can sell/buy price be lower than mean price
 
 // other program defining constant
 // define the port where you want this server to run, can be also 80 if you don't have
 // any other (web)service running in that port. E.g. localhost:1185/elite or if port 80,
 // then just localhost/elite to access your server
-const PORT = 1185; 
+const PORT = 1186; 
 
 //how long same commodities file is used before new one is downloaded
 //commodities file is used to obtain info about commodity ids.
 const COMSEXPIRE = 1000*60*60*24*7; //in milliseconds
 const COMFILE = 'commodities.json';
 
-var jsons = new Array(); // this variable will store all the received eddn jsons
+var jsons = new Array(); //this variable will store all the received eddn jsons
 // schema files will be buffered after first download, schema1 is old address
 // and schema3 is new address, schema1 is probably obsolete.
 var schema1 = null;
@@ -37,6 +51,8 @@ var schema3 = null;
 
 // counter for how many times we have sent 3hdata to those who have asked
 var reqCount = 0;
+
+var jsonStorageFile = __dirname + '/jsonStorage.txt';
 
 var commodities = {time : '', data : ''};
 
@@ -46,6 +62,61 @@ getCommodities(); //if this fails totally, you can download commodities.json
 // try updating commodity.json at COMSEXPIRE interval
 // to force update, just delete commodity.json before running eddn.js
 const intervalObj = setInterval(updateCommodities, COMSEXPIRE);
+
+// Load data from json file if file exists
+loadJsonStorage(jsonStorageFile, commodities);
+LOG('verbose', 'Jsons after reading storage file: ' + jsons.length);
+
+// write eddn json to storage file
+// This is closed during purge operation and thus needs to be reopened
+// after purge is done. 
+var jsonWriter = require('fs').createWriteStream(jsonStorageFile, {'flags':'a'});
+
+jsonWriter.on('error', (error) => {
+    LOG('error', 'Failed to writer json to storage file: ' + error);
+});
+
+// Delete old lines from json storage file, while the method is run, store the
+// starting timestamp and when the purgin is complete, save the files from 3h
+// buffer to the file, starting from the timestamp.
+var purgeStart = null;
+var purgeComplete = false; 
+function StoragePurger(jsonFile, deleteOlder){
+    this.jsonFile = jsonFile;
+    this.deleteOlder = deleteOlder;
+};
+
+StoragePurger.prototype.purgeJsonsFile = function (){
+    LOG('info', 'Purging old data from: ' + this.jsonFile);
+    fs = require('fs');
+    jsonWriter.end();
+    purgeStart = new Date();
+    var filt = new Filter(purgeStart - this.deleteOlder);
+    lineFilt.lineFilter(this.jsonFile, filt.filter, ()=> {
+        LOG('debug', 'JsonFile purged of old data');
+        purgeComplete = true;
+        jsonWriter = fs.createWriteStream(jsonStorageFile, {'flags':'a'});
+    });
+};
+function purgeri(jsonFile){
+    LOG('info', 'Purging2 old data from: ' + jsonFile);
+    fs = require('fs');
+    jsonWriter.end();
+    purgeStart = new Date();
+    var filt = new Filter(purgeStart - 1000*60*60*24);
+    lineFilt.lineFilter(jsonFile, filt.filter, ()=> {
+        LOG('debug', 'JsonFile purged of old data');
+        purgeComplete = true;
+        jsonWriter = fs.createWriteStream(jsonStorageFile, {'flags':'a'});
+    });
+}
+// Storage purger will erase jsons older than 24h from storage file
+var purger = new StoragePurger(jsonStorageFile, 1000*60*60*24);
+// remove obsolete json strings from file at 10 minute intervals
+//const jsonPurgeInterval = setInterval(purger.purgeJsonsFile, 1000*20);
+const jsonPurgeInterval = setInterval(()=> purgeri(jsonStorageFile), 1000*20);
+
+purger.purgeJsonsFile();
 
 LOG('info', 'Creating web server');
 var server = http.createServer(function (req, res) {
@@ -104,7 +175,7 @@ sock.on('message', function(message) {
     });
 });
 server.listen(PORT).on('error', error => {
-    LOG('error', 'Port ' + PORT +' is already in use, maybe eddm is running?');
+    LOG('error', 'Port ' + PORT +' is already in use, maybe eddn is running?');
     process.exit(1);
 });
 LOG('info', "server listening on " + PORT);
@@ -212,7 +283,7 @@ function getCommodities() {
     }
 }
 
-// This will check if commodities.json has expires and will delete the old
+// This will check if commodities.json has expired and will delete the old
 // file and then calls getCommodities to update the file to more current state
 function updateCommodities() {
     var now = new Date();
@@ -252,118 +323,61 @@ function convertCommodities(comJson) {
     }
     return comJson;
 }
+
+// Filter for the lineFilter method
+// class Filter {
+function Filter(timeStamp) {
+    this.timeStamp = new Date();
+
+
+    function filter(line) {
+        var array = line.split('/(:(.+)/');
+        if(Date(array[0]) < this.timeStamp){
+            return true;
+        }
+        return false;
+    }
+}; //class Filter
+
 // uses the downloaded schema and commodities.json to parse eddn jsons.
 function useSchema(rawJson, schema, header, data, comJson) {
     // validate data, i.e. so that all fields are correct
     if(!validate(rawJson, schema))
         return;
 
-    // data passed schema validation, lets check values against average prices
-    var len = Object.keys(data.commodities).length;
-    var time = new Date(Date.parse(data.timestamp));
-    //id,station_id,commodity_id,supply,supply_bracket,buy_price,sell_price,demand,demand_bracket,collected_at
-    //id is not needed by Trade Dangerous or is set by it. Thus leave it empty.
-    var cvsString='';
+    var time = new Date(Date.parse(header.gatewayTimestamp));
 
-    // check that prices are sane
-    // todo: add more intelligent heuristics or automatic logic for checks
-    for(var i = 0; i < len; i++){
-        var top = TOP_LIMIT/100 * data.commodities[i].meanPrice +
-                data.commodities[i].meanPrice;
-        var bot = data.commodities[i].meanPrice - BOT_LIMIT/100 *
-                data.commodities[i].meanPrice;
-        if(bot < 0) bot = 0;
+    addJsonToJsons(data, time, comJson, () => {
+
+        LOG('debug', "jsons size %s", jsons.length);
+    
+        // next remove all items older than 3 hours from the array
+        var count = 0;
+        while(jsons[count][0] < Date.now() - 3*60*60*1000)
+            count++;
+        jsons.splice(0, count);
+        LOG('debug', 'removed old items from memory: ' + purgeStart);
         
-        if(data.commodities[i].buyPrice > 0 && (
-            data.commodities[i].buyPrice > top ||
-                data.commodities[i].buyPrice < bot ) ||
-           data.commodities[i].sellPrice > 0 && (
-               data.commodities[i].sellPrice > top ||
-                   data.commodities[i].sellPrice < bot)) {
-            LOG('debug', data.commodities[i].name + ' avg:' +
-                data.commodities[i].meanPrice + ' t:' +
-                top + ' b:' +
-                bot + ' buy:' +
-                data.commodities[i].buyPrice + ' sell:' +
-                        data.commodities[i].sellPrice);      
-            LOG('warning', 'json price exceed limits, ignoring data');
-            return;
+        if(purgeStart === null) {
+            LOG('silly', 'Writing json to storage file');
+            jsonWriter.write(time.getTime() + ':' + JSON.stringify(rawJson)
+                             + '\n');
         }
-        // price was ok, lets check the other fields also
-        if(data.marketId === undefined) {
-            LOG('warning', 'marketId undefined, ignoring data');
-            return;
-        }
-        if(data.commodities[i].stock === undefined ||
-           data.commodities[i].stockBracket === undefined ||
-           data.commodities[i].demand === undefined ||
-           data.commodities[i].demandBracket === undefined) {
-            LOG('warning', 'Stock or demand info undefined');
-        }
-        // all field are at least set,  lets find a match from commodities.json
-        var found=false;
-        for(var j = 0; j < comJson.length; j++)
-        {
-            if(data.commodities[i].name.toUpperCase()  === comJson[j].name.toUpperCase()) {
-                cvsString += ',';
-                cvsString += data.marketId + ',';
-                cvsString += comJson[j].id + ',';
-                cvsString += data.commodities[i].stock + ',';
-                cvsString += data.commodities[i].stockBracket + ',';
-                cvsString += data.commodities[i].buyPrice + ',';
-                cvsString += data.commodities[i].sellPrice + ',';
-                cvsString += data.commodities[i].demand + ',';
-                cvsString += data.commodities[i].demandBracket + ',';
-                cvsString += Date.parse(data.timestamp) + '\n'; 
-                found=true;
-                break;
+        else if(purgeComplete) {
+            LOG('silly', 'Purge done, emptying buffer to json storage');
+            purgeComplete = false; // we are ready for next purge round
+            purgeStart = null;
+            var i = jsons.length - 1;
+
+            while(jsons[i][0] > Date.parse(purgeStart) && i > 0)
+                i--;
+            while(jsons[i][0] > Date.parse(purgeStart) && i < jsons.length) {
+                jsonWriter.write(jsons[i][0] + ':' +
+                                 JSON.stringify(jsons[i][1]) + '\n');
             }
-        }
-        if(!found)
-            LOG('warning', 'looking for: ' + data.commodities[i].name +
-                ' no match found');
-    }
-    LOG('debug', 'cvs: ' + cvsString);
-    LOG('debug', '%s-%s - System: %s[%s] commodities: %s',
-        header.gatewayTimestamp, time,
-        data.systemName, data.stationName, len);
-
-    jsons.push(new Array());
-    jsons[jsons.length-1][0]=time.getTime();
-    jsons[jsons.length-1][1]=rawJson;
-    jsons[jsons.length-1][2]=cvsString;;
-    
-    LOG('debug', "jsons size %s", jsons.length);
-    
-    // next remove all items older than 3 hours from the array
-    var count = 0;
-    while(jsons[count][0]<Date.now() - 3*60*60*1000)
-        count++;
-    jsons.splice(0, count);
-    
-    // todo: in case of restart, write 3h array to to a file at an hour interval
-    
-    LOG('debug', '%s - System: %s, Station: %s - MarketId: ',
-        data.timestamp,
-        data.systemName,
-        data.stationName,
-        data.marketId);
-    LOG('debug', sprintf('%-30s %8s    %8s    %6s    %6s', 'NAME', 'STOCK','DEMAND', 'BUY', 'SELL'));
-    var mapping={ 0:'N', 1:'L', 2:'M', 3:'H', '':'N'};
-    for(var i = 0; i < len; i++){
-        var d = mapping[data.commodities[i].demandBracket];
-        if(d == null) d='N';
-        LOG('debug', sprintf('%-30s %8s    %8s %s    %6s    %6s %6s',
-                             data.commodities[i].name,
-                             data.commodities[i].stock,
-                             data.commodities[i].demand,
-                             d,
-                             data.commodities[i].buyPrice,
-                             data.commodities[i].sellPrice,
-                             data.commodities[i].meanPrice));
-    }
-}    
-
+        }    
+    });
+}
 // This will create the actual download page 3hdata.
 // When user clicks the 3hdata link or uses some other way
 // to download the 3hdata, then this method is executed.
@@ -398,10 +412,13 @@ function downloadPage(res, dataArray, dataType) {
     if(dataType === 'json') {
         ss.push('[');
         for(var i = 0; i < dataArray.length; i++) {
-            if(i < dataArray.length - 1)
+            if(i < dataArray.length - 1) {
                 ss.push(JSON.stringify(dataArray[i][1]) + ',');
-            else
-                ss.push(JSON.stringify(dataArray[i][1])); //during last round, don't add , to end
+            }
+            else {
+                //during last round, don't add , to end
+                ss.push(JSON.stringify(dataArray[i][1]));
+            }
         }
         ss.push(']');
     }
@@ -441,7 +458,6 @@ jarkko.vartiainen at googles most prominent web mail.com</p>');
     res.write('<p class="cent" >Eddn listener v.' + VERSION + '</p>');
     res.end();
 }
-
 function validate(json, schema) {
     var Ajv = require('ajv');
     var ajv = Ajv({ schemaId: 'auto'});
@@ -449,4 +465,139 @@ function validate(json, schema) {
     ajv.compile(schema);
     var valid = ajv.validate(json);
     return valid;
+}
+
+// todo, possible race if this takes longer than setting up server and receiving data
+// from network?
+function loadJsonStorage(storageFile, comJson) {
+    LOG('info', 'Loading jsonStorage: ' + storageFile + comJson);
+    var fs = require('fs');
+    var now = new Date();
+    var threehAgo = now.getTime() - 1000*60*60*3;
+
+    const rstream = fs.createReadStream(storageFile);
+    var data='';
+    rstream.on('data', chunk => {
+        data += chunk;
+        while(data.indexOf('\n') !== -1) {
+            const line = data.slice(0, data.indexOf('\n'));
+            data = data.substr(data.indexOf('\n') + 1);
+            if(line.split(':')[0] > threehAgo) {
+                // split will use only first ":" for splitting, rest are considered
+                // as part of the last token
+                const json = JSON.parse(line.substring(line.indexOf(':') + 1)).message;
+                const time = new Date(Number(line.split(':',1)));
+                
+                addJsonToJsons(json, time, comJson, () =>{});
+            }
+        }
+    });
+    rstream.on('error', (err) => LOG('info', 'Error reading json storage file:: ' +err));
+    rstream.on('finish', ()=> LOG('debug', 'Data from json storage retreived'));
+}
+
+// add single json string to a jsons array, also create the csv list from the json
+// input: json = parsed json object containing market data, e.g. from eddn
+//        time    = timestamp to be given for the json string
+//        comJson = commodities json object, from eddb website
+//         cb     = callback
+function addJsonToJsons(json, time, comJson, cb){
+    var len = Object.keys(json.commodities).length;
+    // data passed schema validation, lets check values against average prices
+
+    var cvsString='';
+
+    // check that prices are sane
+    // todo: add more intelligent heuristics or automatic logic for checks
+    for(var i = 0; i < len; i++){
+        var top = TOP_LIMIT/100 * json.commodities[i].meanPrice +
+                json.commodities[i].meanPrice;
+        var bot = json.commodities[i].meanPrice - BOT_LIMIT/100 *
+                json.commodities[i].meanPrice;
+        if(bot < 0) bot = 0;
+        
+        if(json.commodities[i].buyPrice > 0 && (
+            json.commodities[i].buyPrice > top ||
+                json.commodities[i].buyPrice < bot ) ||
+           json.commodities[i].sellPrice > 0 && (
+               json.commodities[i].sellPrice > top ||
+                   json.commodities[i].sellPrice < bot)) {
+            LOG('debug', json.commodities[i].name + ' avg:' +
+                json.commodities[i].meanPrice + ' t:' +
+                top + ' b:' +
+                bot + ' buy:' +
+                json.commodities[i].buyPrice + ' sell:' +
+                        json.commodities[i].sellPrice);      
+            LOG('warning', 'json price exceed limits, ignoring data');
+            return;
+        }
+        // price was ok, lets check the other fields also
+        if(json.marketId === undefined) {
+            LOG('warning', 'marketId undefined, ignoring data');
+            return;
+        }
+        if(json.commodities[i].stock === undefined ||
+           json.commodities[i].stockBracket === undefined ||
+           json.commodities[i].demand === undefined ||
+           json.commodities[i].demandBracket === undefined) {
+            LOG('warning', 'Stock or demand info undefined');
+        }
+        // all field are at least set,  lets find a match from commodities.json
+        var found = false;
+        for(var j = 0; j < comJson.length; j++)
+        {
+            //id,station_id,commodity_id,supply,supply_bracket,buy_price,sell_price,
+            //demand,demand_bracket,collected_at
+            //id is not needed by Trade Dangerous or is set by it -> leave it empty.
+            if(json.commodities[i].name.toUpperCase() ===
+               comJson[j].name.toUpperCase()){
+                cvsString += ',';
+                cvsString += json.marketId + ',';
+                cvsString += comJson[j].id + ',';
+                cvsString += json.commodities[i].stock + ',';
+                cvsString += json.commodities[i].stockBracket + ',';
+                cvsString += json.commodities[i].buyPrice + ',';
+                cvsString += json.commodities[i].sellPrice + ',';
+                cvsString += json.commodities[i].demand + ',';
+                cvsString += json.commodities[i].demandBracket + ',';
+                cvsString += Date.parse(json.timestamp) / 1000 + '\n'; 
+                found=true;
+                break;
+            }
+        }
+        if(!found)
+            LOG('warning', 'looking for: ' + json.commodities[i].name +
+                ' no match found');
+    }
+    
+    LOG('debug', 'cvs: ' + cvsString);
+    LOG('debug', '%s - System: %s[%s] commodities: %s',
+        time, json.systemName, json.stationName, len);
+    
+    jsons.push(new Array());
+    jsons[jsons.length-1][0]=time.getTime();
+    jsons[jsons.length-1][1]=json;
+    jsons[jsons.length-1][2]=cvsString;
+    
+    LOG('debug', '%s - System: %s, Station: %s - MarketId: ',
+        json.timestamp,
+        json.systemName,
+        json.stationName,
+        json.marketId);
+    LOG('debug', sprintf('%-30s %8s    %8s    %6s    %6s',
+                         'NAME', 'STOCK','DEMAND', 'BUY', 'SELL'));
+    var mapping={ 0:'N', 1:'L', 2:'M', 3:'H', '':'N'};
+    for(var i = 0; i < len; i++){
+        var d = mapping[json.commodities[i].demandBracket];
+        if(d == null) d='N';
+        LOG('debug', sprintf('%-30s %8s    %8s %s    %6s    %6s %6s',
+                             json.commodities[i].name,
+                             json.commodities[i].stock,
+                             json.commodities[i].demand,
+                             d,
+                             json.commodities[i].buyPrice,
+                             json.commodities[i].sellPrice,
+                             json.commodities[i].meanPrice));
+    }
+    cb();
 }
