@@ -1,12 +1,13 @@
 {
   "name": "eddn-client",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "description": "simple eddn client",
   "main": "eddn.js",
   "dependencies": {
     "sprintf-js": "~1.1.1",
     "zmq": "~2.15.0",
-    "winston": "latest"
+    "winston": "~2.4.2",
+    "ajv": "~6.5.0"
   },
   "devDependencies": {},
   "scripts": {

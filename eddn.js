@@ -1,4 +1,4 @@
-var VERSION  = '0.0.4';
+var VERSION  = '0.1.0';
 var zmq      = require('zmq')
   , sock     = zmq.socket('sub')
   , zlib     = require('zlib')
@@ -25,7 +25,6 @@ winston.configure({
     ]
 });
 var LOG = winston.log;
-//var LOG = logger.log;
 
 LOG('info', 'Starting eddn listener/web server v.' + VERSION);
 // these next variables can be used to tune item price checks
@@ -36,7 +35,7 @@ const BOT_LIMIT = 1500; //% how many percents can sell/buy price be lower than m
 // define the port where you want this server to run, can be also 80 if you don't have
 // any other (web)service running in that port. E.g. localhost:1185/elite or if port 80,
 // then just localhost/elite to access your server
-const PORT = 1186; 
+const PORT = 1185; 
 
 //how long same commodities file is used before new one is downloaded
 //commodities file is used to obtain info about commodity ids.
@@ -63,10 +62,6 @@ getCommodities(); //if this fails totally, you can download commodities.json
 // to force update, just delete commodity.json before running eddn.js
 const intervalObj = setInterval(updateCommodities, COMSEXPIRE);
 
-// Load data from json file if file exists
-loadJsonStorage(jsonStorageFile, commodities);
-LOG('verbose', 'Jsons after reading storage file: ' + jsons.length);
-
 // write eddn json to storage file
 // This is closed during purge operation and thus needs to be reopened
 // after purge is done. 
@@ -76,47 +71,31 @@ jsonWriter.on('error', (error) => {
     LOG('error', 'Failed to writer json to storage file: ' + error);
 });
 
+jsonFilePurge(jsonStorageFile); // delete old entries
+
+// Load data from json file if file exists
+loadJsonStorage(jsonStorageFile, commodities);
+
 // Delete old lines from json storage file, while the method is run, store the
 // starting timestamp and when the purgin is complete, save the files from 3h
 // buffer to the file, starting from the timestamp.
 var purgeStart = null;
 var purgeComplete = false; 
-function StoragePurger(jsonFile, deleteOlder){
-    this.jsonFile = jsonFile;
-    this.deleteOlder = deleteOlder;
-};
-
-StoragePurger.prototype.purgeJsonsFile = function (){
-    LOG('info', 'Purging old data from: ' + this.jsonFile);
+function jsonFilePurge(jsonFile){
+    LOG('info', 'Purging old data from: ' + jsonFile);
     fs = require('fs');
     jsonWriter.end();
     purgeStart = new Date();
-    var filt = new Filter(purgeStart - this.deleteOlder);
-    lineFilt.lineFilter(this.jsonFile, filt.filter, ()=> {
-        LOG('debug', 'JsonFile purged of old data');
-        purgeComplete = true;
-        jsonWriter = fs.createWriteStream(jsonStorageFile, {'flags':'a'});
-    });
-};
-function purgeri(jsonFile){
-    LOG('info', 'Purging2 old data from: ' + jsonFile);
-    fs = require('fs');
-    jsonWriter.end();
-    purgeStart = new Date();
-    var filt = new Filter(purgeStart - 1000*60*60*24);
+    var filt = new Filter(purgeStart - 1000*60*60*24); //delete older than 24h
     lineFilt.lineFilter(jsonFile, filt.filter, ()=> {
         LOG('debug', 'JsonFile purged of old data');
         purgeComplete = true;
         jsonWriter = fs.createWriteStream(jsonStorageFile, {'flags':'a'});
     });
 }
-// Storage purger will erase jsons older than 24h from storage file
-var purger = new StoragePurger(jsonStorageFile, 1000*60*60*24);
-// remove obsolete json strings from file at 10 minute intervals
-//const jsonPurgeInterval = setInterval(purger.purgeJsonsFile, 1000*20);
-const jsonPurgeInterval = setInterval(()=> purgeri(jsonStorageFile), 1000*20);
 
-purger.purgeJsonsFile();
+// remove obsolete json strings from file at 10 minute intervals
+const jsonPurgeInterval = setInterval(()=> jsonFilePurge(jsonStorageFile), 1000*60*10);
 
 LOG('info', 'Creating web server');
 var server = http.createServer(function (req, res) {
@@ -348,7 +327,6 @@ function useSchema(rawJson, schema, header, data, comJson) {
     var time = new Date(Date.parse(header.gatewayTimestamp));
 
     addJsonToJsons(data, time, comJson, () => {
-
         LOG('debug', "jsons size %s", jsons.length);
     
         // next remove all items older than 3 hours from the array
@@ -470,7 +448,7 @@ function validate(json, schema) {
 // todo, possible race if this takes longer than setting up server and receiving data
 // from network?
 function loadJsonStorage(storageFile, comJson) {
-    LOG('info', 'Loading jsonStorage: ' + storageFile + comJson);
+    LOG('info', 'Loading jsonStorage: ' + storageFile);
     var fs = require('fs');
     var now = new Date();
     var threehAgo = now.getTime() - 1000*60*60*3;
@@ -492,8 +470,9 @@ function loadJsonStorage(storageFile, comJson) {
             }
         }
     });
-    rstream.on('error', (err) => LOG('info', 'Error reading json storage file:: ' +err));
-    rstream.on('finish', ()=> LOG('debug', 'Data from json storage retreived'));
+    rstream.on('error', (err) => LOG('error', 'Error reading json storage file:: ' +err));
+    rstream.on('end', ()=> LOG('info', 'Data from json storage retreived: ' +
+                              jsons.length + ' entries read'));
 }
 
 // add single json string to a jsons array, also create the csv list from the json
@@ -502,6 +481,7 @@ function loadJsonStorage(storageFile, comJson) {
 //        comJson = commodities json object, from eddb website
 //         cb     = callback
 function addJsonToJsons(json, time, comJson, cb){
+
     var len = Object.keys(json.commodities).length;
     // data passed schema validation, lets check values against average prices
 
@@ -573,24 +553,24 @@ function addJsonToJsons(json, time, comJson, cb){
     LOG('debug', 'cvs: ' + cvsString);
     LOG('debug', '%s - System: %s[%s] commodities: %s',
         time, json.systemName, json.stationName, len);
-    
+
     jsons.push(new Array());
     jsons[jsons.length-1][0]=time.getTime();
     jsons[jsons.length-1][1]=json;
     jsons[jsons.length-1][2]=cvsString;
     
-    LOG('debug', '%s - System: %s, Station: %s - MarketId: ',
+    LOG('silly', '%s - System: %s, Station: %s - MarketId: ',
         json.timestamp,
         json.systemName,
         json.stationName,
         json.marketId);
-    LOG('debug', sprintf('%-30s %8s    %8s    %6s    %6s',
+    LOG('silly', sprintf('%-30s %8s    %8s    %6s    %6s',
                          'NAME', 'STOCK','DEMAND', 'BUY', 'SELL'));
     var mapping={ 0:'N', 1:'L', 2:'M', 3:'H', '':'N'};
     for(var i = 0; i < len; i++){
         var d = mapping[json.commodities[i].demandBracket];
         if(d == null) d='N';
-        LOG('debug', sprintf('%-30s %8s    %8s %s    %6s    %6s %6s',
+        LOG('silly', sprintf('%-30s %8s    %8s %s    %6s    %6s %6s',
                              json.commodities[i].name,
                              json.commodities[i].stock,
                              json.commodities[i].demand,
