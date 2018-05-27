@@ -1,4 +1,4 @@
-var VERSION  = '0.1.1';
+var VERSION  = '0.1.2';
 var zmq      = require('zmq')
   , sock     = zmq.socket('sub')
   , zlib     = require('zlib')
@@ -399,7 +399,7 @@ function downloadPage(res, dataArray, dataType) {
         ss.push(']');
     }
     else if(dataType === 'csv') {
-        ss.push('id,station_id,commodity_id,supply,supply_bracket,buy_price, sell_price,demand,demand_bracket,collected_at\n');
+        ss.push('id,station_id,commodity_id,supply,supply_bracket,buy_price,sell_price,demand,demand_bracket,collected_at\n');
         dataArray.forEach(item => ss.push(item[2]));
     }
     ss.push(null); // end of data
