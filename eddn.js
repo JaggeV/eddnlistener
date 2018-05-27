@@ -1,4 +1,4 @@
-var VERSION  = '0.1.0';
+var VERSION  = '0.1.1';
 var zmq      = require('zmq')
   , sock     = zmq.socket('sub')
   , zlib     = require('zlib')
@@ -35,7 +35,7 @@ const BOT_LIMIT = 1500; //% how many percents can sell/buy price be lower than m
 // define the port where you want this server to run, can be also 80 if you don't have
 // any other (web)service running in that port. E.g. localhost:1185/elite or if port 80,
 // then just localhost/elite to access your server
-const PORT = 1185; 
+const PORT = 1186; 
 
 //how long same commodities file is used before new one is downloaded
 //commodities file is used to obtain info about commodity ids.
@@ -203,20 +203,18 @@ function getCommodities() {
         var fInfo = fs.statSync(COMFILE);
         var now = new Date();
         var fileDate = new Date(fInfo.mtime);
-        LOG('debug', 'commodities.json age: ' + fileDate);
+        LOG('info', 'commodities.json age: ' + fileDate);
         if(now - fileDate < COMSEXPIRE) {//time diff is in milliseconds
             LOG('info', 'Using existing commodities.json');
             fs.readFile(COMFILE, (err, data) => {
                 if(err) {
                     LOG('error', 'Failed to open ' +COMFILE + 'due to ' + err);
-                    fs.unlink(COMFILE);
-                    getCommodities();
+                    fs.unlink(COMFILE, (err) => getCommodities());
                 }
                 if(data === 'undefined')
                 {
                     LOG('warning', 'Commodities data length = 0, downloading new');
-                    fs.unlink(COMFILE);
-                    getCommodities();
+                    fs.unlink(COMFILE, (err) => getCommodities());
                     return;
                 }     
                 commodities.time = fileDate;
@@ -226,28 +224,28 @@ function getCommodities() {
         }
         else {
             // existing file is too old
-            fs.unlink(COMFILE);
-            getCommodities();
+            fs.unlink(COMFILE, (err) => getCommodities());
         }
     }
     else {
         // file did not exists, thus need to download it
         LOG('info', COMFILE + ' did not exist, downloading it');
+        var dlData;
         const req = https.get(comUrl, function(response) {
             if(response.statusCode === 200) {
                 response.on('data', function(chunk) {
-                    commodities.data += chunk;
+                    dlData += chunk;
                 });
-                response.on('end', function() {
+                response.on('finish', function() {
                     commodities.time = new Date();
-                    fs.writeFile(COMFILE, commodities.data, err => {
+                    fs.writeFile(COMFILE, dlData, err => {
                         if(err)
                             LOG('error', 'Failed to write ' + COMFILE +
                                 ' to drive');
                         else
                             LOG('verbose', 'Saved ' + COMFILE);
                     });
-                    commodities.data = JSON.parse(commodities.data);
+                    commodities.data = JSON.parse(dlData);
                     commodities.data = convertCommodities(commodities.data);
                 });
                 response.on('error', function() {
@@ -270,12 +268,12 @@ function updateCommodities() {
     {
         LOG('info', COMFILE + ' has expired, downloading new one');
         var fs = require('fs');
-        fs.unlink(COMFILE);
-        commodities.time = '';
-        getCommodities();
+        fs.unlink(COMFILE, (err) => {
+            commodities.time = '';
+            getCommodities();
+        });
     }
 }
-
 // this method will convert commodities.json commodities names to names
 // that eddn network provides, .e.g. Narcotics become BasicNarcotics etc...
 function convertCommodities(comJson) {
