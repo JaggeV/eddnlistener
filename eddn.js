@@ -1,4 +1,4 @@
-var VERSION  = '0.1.2';
+var VERSION  = '0.1.3';
 var zmq      = require('zmq')
   , sock     = zmq.socket('sub')
   , zlib     = require('zlib')
@@ -11,10 +11,9 @@ var zmq      = require('zmq')
   , lineFilt = require('./lineedit.js')
 ;
 
-//var logger = new (winston.Logger)({
 winston.configure({
     transports: [
-        new (winston.transports.Console)({level:'info', colorize: true}),
+        new (winston.transports.Console)({level:'debug', colorize: true}),
         new (winston.transports.File)({
             Filename: 'eddn.log',
             dirname: __dirname,
@@ -55,7 +54,14 @@ var jsonStorageFile = __dirname + '/jsonStorage.txt';
 
 var commodities = {time : '', data : ''};
 
-getCommodities(); //if this fails totally, you can download commodities.json
+var comfileexists = false;
+getCommodities(() => {
+    jsonFilePurge(jsonStorageFile, () => { // delete old entries
+        loadJsonStorage(jsonStorageFile, commodities.data, () => { // load comdata
+            createWebServer();
+        });
+    });
+}); //if this fails totally, you can download commodities.json
 // into eddn.js directory getCommodities tries to use that file directly.
 
 // try updating commodity.json at COMSEXPIRE interval
@@ -64,101 +70,104 @@ const intervalObj = setInterval(updateCommodities, COMSEXPIRE);
 
 // write eddn json to storage file
 // This is closed during purge operation and thus needs to be reopened
-// after purge is done. 
+// after purge is done.
+var okToWrite = false; //flag for writing into storageJson
 var jsonWriter = require('fs').createWriteStream(jsonStorageFile, {'flags':'a'});
 
 jsonWriter.on('error', (error) => {
     LOG('error', 'Failed to writer json to storage file: ' + error);
 });
 
-jsonFilePurge(jsonStorageFile); // delete old entries
-
-// Load data from json file if file exists
-loadJsonStorage(jsonStorageFile, commodities);
-
 // Delete old lines from json storage file, while the method is run, store the
 // starting timestamp and when the purgin is complete, save the files from 3h
 // buffer to the file, starting from the timestamp.
 var purgeStart = null;
 var purgeComplete = false; 
-function jsonFilePurge(jsonFile){
+function jsonFilePurge(jsonFile, cb){
     LOG('info', 'Purging old data from: ' + jsonFile);
-    fs = require('fs');
+    var fs = require('fs');
     jsonWriter.end();
     purgeStart = new Date();
+    okToWrite = false;
     var filt = new Filter(purgeStart - 1000*60*60*24); //delete older than 24h
     lineFilt.lineFilter(jsonFile, filt.filter, ()=> {
         LOG('debug', 'JsonFile purged of old data');
         purgeComplete = true;
         jsonWriter = fs.createWriteStream(jsonStorageFile, {'flags':'a'});
+        cb();
     });
 }
 
 // remove obsolete json strings from file at 10 minute intervals
-const jsonPurgeInterval = setInterval(()=> jsonFilePurge(jsonStorageFile), 1000*60*10);
+const jsonPurgeInterval = setInterval(()=> jsonFilePurge(jsonStorageFile),
+                                      1000*60*10);
 
-LOG('info', 'Creating web server');
-var server = http.createServer(function (req, res) {
-    if (req.method.toLowerCase() == 'get') {
-        var u = url.parse(req.url).pathname;
-        if(u === "/elite"|| u === "/elite/") {
-            displayPage(res);
-            return;
-        }
-        else if(u==="/elite/3hdata") {
-            downloadPage(res, jsons, 'json');
-            return;
-        }
-        else if(u==="/elite/3hdataCSV") {
-            downloadPage(res, jsons, 'csv');
-        }
-        else {
-            res.writeHead(404, {'Content-type':'text/html'});
-            res.write('<h1>404 Page not found</h1>');
-            res.end();
-            return;
-        }
-    } else if (req.method.toLowerCase() == 'post') {
-        return;
-    }
-});
-
-sock.connect('tcp://eddn.edcd.io:9500');
-sock.subscribe('');
-LOG('info', 'waiting for updates...');
-sock.on('message', function(message) {
-    zlib.inflate(message, function(err, chunk) {
-        var payload   = JSON.parse(chunk.toString('utf8'))
-          , schemaRef = payload && payload.$schemaRef
-          , header    = payload && payload.header
-          , data      = payload && payload.message
-        ;
-
-        if (schemaRef === 'http://schemas.elite-markets.net/eddn/commodity/1') {
-            if(schema1 === null)
-                downloadSchema(schemaRef, payload, header, data);
-            else
-                useSchema(payload, schema1, header, data, commodities.data);
-            
-        }
-        else if(schemaRef === 'https://eddn.edcd.io/schemas/commodity/3') {
-            if(schema3 === null)
-                downloadSchema(schemaRef, payload, header, data );
-            else
-                useSchema(payload, schema3, header, data, commodities.data);
-        }
-        else {
-            LOG('silly', 'unsupported schema in json "%s"', schemaRef); 
+function createWebServer() {
+    LOG('info', 'Creating web server');
+    var server = http.createServer(function (req, res) {
+        if (req.method.toLowerCase() == 'get') {
+            var u = url.parse(req.url).pathname;
+            if(u === "/elite"|| u === "/elite/") {
+                displayPage(res);
+                return;
+            }
+            else if(u==="/elite/3hdata") {
+                downloadPage(res, jsons, 'json');
+                return;
+            }
+            else if(u==="/elite/3hdataCSV") {
+                downloadPage(res, jsons, 'csv');
+            }
+            else if(u==="/elite/24hdataCSV") {
+                upload24h(res, jsonStorageFile, commodities.data);
+            }
+            else {
+                res.writeHead(404, {'Content-type':'text/html'});
+                res.write('<h1>404 Page not found</h1>');
+                res.end();
+                return;
+            }
+        } else if (req.method.toLowerCase() == 'post') {
             return;
         }
     });
-});
-server.listen(PORT).on('error', error => {
-    LOG('error', 'Port ' + PORT +' is already in use, maybe eddn is running?');
-    process.exit(1);
-});
-LOG('info', "server listening on " + PORT);
 
+    sock.connect('tcp://eddn.edcd.io:9500');
+    sock.subscribe('');
+    LOG('info', 'waiting for updates...');
+    sock.on('message', function(message) {
+        zlib.inflate(message, function(err, chunk) {
+            var payload   = JSON.parse(chunk.toString('utf8'))
+            , schemaRef = payload && payload.$schemaRef
+            , header    = payload && payload.header
+            , data      = payload && payload.message
+            ;
+            
+            if (schemaRef === 'http://schemas.elite-markets.net/eddn/commodity/1') {
+                if(schema1 === null)
+                    downloadSchema(schemaRef, payload, header, data);
+                else
+                    useSchema(payload, schema1, header, data, commodities.data);
+                
+            }
+            else if(schemaRef === 'https://eddn.edcd.io/schemas/commodity/3') {
+                if(schema3 === null)
+                    downloadSchema(schemaRef, payload, header, data );
+                else
+                    useSchema(payload, schema3, header, data, commodities.data);
+            }
+            else {
+                LOG('silly', 'unsupported schema in json "%s"', schemaRef); 
+                return;
+            }
+        });
+    });
+    server.listen(PORT).on('error', error => {
+        LOG('error', 'Port ' + PORT +' is already in use, maybe eddn is running?');
+        process.exit(1);
+    });
+    LOG('info', "server listening on " + PORT);
+}
 // This will download schema file from eddn.io website, then the schema
 // will be used to validate all downloaded data.
 // The schema file is a bit lacking, so it might be, that this stage
@@ -193,8 +202,8 @@ function downloadSchema(schemaUrl, rawJson, header, data) {
 
 // Download commodities.json from eddb.io, contains unique commodity id for all items.
 // Save the file to drive for later use. If the file is older than a week, redownload
-// to see if anything has changed. 
-function getCommodities() {
+// to see if anything has changed.
+function getCommodities(cb) {
     var fs = require('fs');
     var comUrl = 'https://eddb.io/archive/v5/commodities.json';
     var schema='';
@@ -210,21 +219,24 @@ function getCommodities() {
                 if(err) {
                     LOG('error', 'Failed to open ' +COMFILE + 'due to ' + err);
                     fs.unlink(COMFILE, (err) => getCommodities());
+                    cb();
                 }
                 if(data === 'undefined')
                 {
                     LOG('warning', 'Commodities data length = 0, downloading new');
                     fs.unlink(COMFILE, (err) => getCommodities());
-                    return;
-                }     
+                    cb();
+                }
                 commodities.time = fileDate;
                 commodities.data = JSON.parse(data);
                 commodities.data = convertCommodities(commodities.data);
+                cb();
             });
         }
         else {
             // existing file is too old
             fs.unlink(COMFILE, (err) => getCommodities());
+            cb();
         }
     }
     else {
@@ -247,15 +259,19 @@ function getCommodities() {
                     });
                     commodities.data = JSON.parse(dlData);
                     commodities.data = convertCommodities(commodities.data);
+                    cb();
                 });
                 response.on('error', function() {
                     LOG('error', 'Failed to download ' + COMFILE +
                         ' from ' + comUrl);
+                    cb();
                 });
             }
-            else
+            else{
                 LOG('error', COMFILE + ' url returned bad response ' +
-                    response.statusCode);                   
+                    response.statusCode);
+                cb();
+            }
         });
     }
 }
@@ -332,17 +348,17 @@ function useSchema(rawJson, schema, header, data, comJson) {
         while(jsons[count][0] < Date.now() - 3*60*60*1000)
             count++;
         jsons.splice(0, count);
-        LOG('debug', 'removed old items from memory: ' + purgeStart);
+        LOG('debug', 'removed old items from memory: ' + count);
         
-        if(purgeStart === null) {
+        if(okToWrite) {
             LOG('silly', 'Writing json to storage file');
             jsonWriter.write(time.getTime() + ':' + JSON.stringify(rawJson)
                              + '\n');
         }
         else if(purgeComplete) {
-            LOG('silly', 'Purge done, emptying buffer to json storage');
-            purgeComplete = false; // we are ready for next purge round
-            purgeStart = null;
+            var now = new Date();
+            LOG('silly', 'Purge done, emptying buffer to json storage.' +
+                ' Purge took: ' + (purgeStart - now));
             var i = jsons.length - 1;
 
             while(jsons[i][0] > Date.parse(purgeStart) && i > 0)
@@ -351,6 +367,9 @@ function useSchema(rawJson, schema, header, data, comJson) {
                 jsonWriter.write(jsons[i][0] + ':' +
                                  JSON.stringify(jsons[i][1]) + '\n');
             }
+            purgeComplete = false; // we are ready for next purge round
+            purgeStart = null;
+            okToWrite = true;
         }    
     });
 }
@@ -427,11 +446,13 @@ constantly updated and thus should be quite current. Optimal solution for this p
 would be to use some kind of crontab or similar and download the file every 3h interval\
 so that your data is constantly up to date</p>');
     res.write('<p class="cent" ><a href="elite/3hdata">3hdata</a> ');
-    res.write('<a href="elite/3hdataCSV">3hdataCVS</a></p>');
+    res.write('<a href="elite/3hdataCSV">3hdataCVS</a> ');
+    res.write('<a href="24hdataCSV">24hdataCSV</a></p>');
     res.write('<div class="footer">');
-    res.write('  <p>Please feel free to contact me if you need further support or have improvement ideas,\
-jarkko.vartiainen at googles most prominent web mail.com</p>');
-    res.write('<p class="cent" >Eddn listener v.' + VERSION + '</p>');
+    res.write('  <p>Please feel free to contact me if you need further \
+support or have improvement ideas, jarkko.vartiainen at googles most \
+prominent web mail.com</p>');
+    res.write('  <p class="cent" >Eddn listener v.' + VERSION + '</p>');
     res.end();
 }
 function validate(json, schema) {
@@ -445,7 +466,7 @@ function validate(json, schema) {
 
 // todo, possible race if this takes longer than setting up server and receiving data
 // from network?
-function loadJsonStorage(storageFile, comJson) {
+function loadJsonStorage(storageFile, comJson, cb) {
     LOG('info', 'Loading jsonStorage: ' + storageFile);
     var fs = require('fs');
     var now = new Date();
@@ -453,6 +474,7 @@ function loadJsonStorage(storageFile, comJson) {
 
     const rstream = fs.createReadStream(storageFile);
     var data='';
+    okToWrite = false;
     rstream.on('data', chunk => {
         data += chunk;
         while(data.indexOf('\n') !== -1) {
@@ -469,8 +491,12 @@ function loadJsonStorage(storageFile, comJson) {
         }
     });
     rstream.on('error', (err) => LOG('error', 'Error reading json storage file:: ' +err));
-    rstream.on('end', ()=> LOG('info', 'Data from json storage retreived: ' +
-                              jsons.length + ' entries read'));
+    rstream.on('end', ()=> {
+        LOG('info', 'Data from json storage retreived: ' +
+            jsons.length + ' entries read');
+        okToWrite = true;
+        cb();
+    });
 }
 
 // add single json string to a jsons array, also create the csv list from the json
@@ -479,7 +505,6 @@ function loadJsonStorage(storageFile, comJson) {
 //        comJson = commodities json object, from eddb website
 //         cb     = callback
 function addJsonToJsons(json, time, comJson, cb){
-
     var len = Object.keys(json.commodities).length;
     // data passed schema validation, lets check values against average prices
 
@@ -521,34 +546,10 @@ function addJsonToJsons(json, time, comJson, cb){
             LOG('warning', 'Stock or demand info undefined');
         }
         // all field are at least set,  lets find a match from commodities.json
-        var found = false;
-        for(var j = 0; j < comJson.length; j++)
-        {
-            //id,station_id,commodity_id,supply,supply_bracket,buy_price,sell_price,
-            //demand,demand_bracket,collected_at
-            //id is not needed by Trade Dangerous or is set by it -> leave it empty.
-            if(json.commodities[i].name.toUpperCase() ===
-               comJson[j].name.toUpperCase()){
-                cvsString += ',';
-                cvsString += json.marketId + ',';
-                cvsString += comJson[j].id + ',';
-                cvsString += json.commodities[i].stock + ',';
-                cvsString += json.commodities[i].stockBracket + ',';
-                cvsString += json.commodities[i].buyPrice + ',';
-                cvsString += json.commodities[i].sellPrice + ',';
-                cvsString += json.commodities[i].demand + ',';
-                cvsString += json.commodities[i].demandBracket + ',';
-                cvsString += Date.parse(json.timestamp) / 1000 + '\n'; 
-                found=true;
-                break;
-            }
-        }
-        if(!found)
-            LOG('warning', 'looking for: ' + json.commodities[i].name +
-                ' no match found');
+        cvsString = createCsvString(json, comJson);
     }
     
-    LOG('debug', 'cvs: ' + cvsString);
+    LOG('silly', 'cvs: \n' + cvsString);
     LOG('debug', '%s - System: %s[%s] commodities: %s',
         time, json.systemName, json.stationName, len);
 
@@ -578,4 +579,89 @@ function addJsonToJsons(json, time, comJson, cb){
                              json.commodities[i].meanPrice));
     }
     cb();
+}
+
+function createCsvString(json, comJson) {
+    if(comJson.length === undefined || comJson.length === 0)
+        assert(false);
+    var csvString='';
+    var found = false;
+    for(var i = 0; i < json.commodities.length; i++) {
+        for(var j = 0; j < comJson.length; j++)
+        {
+            //id,station_id,commodity_id,supply,supply_bracket,buy_price,sell_price,
+            //demand,demand_bracket,collected_at
+            //id is not needed by Trade Dangerous or is set by it -> leave it empty.
+            if(json.commodities[i].name.toUpperCase() ===
+               comJson[j].name.toUpperCase()){
+                csvString += ',';
+                csvString += json.marketId + ',';
+                csvString += comJson[j].id + ',';
+                csvString += json.commodities[i].stock + ',';
+                csvString += json.commodities[i].stockBracket + ',';
+                csvString += json.commodities[i].buyPrice + ',';
+                csvString += json.commodities[i].sellPrice + ',';
+                csvString += json.commodities[i].demand + ',';
+                csvString += json.commodities[i].demandBracket + ',';
+                csvString += Date.parse(json.timestamp) / 1000 + '\n'; 
+                found=true;
+                break;
+            }
+        }
+        if(!found) {
+            LOG('warning', 'looking for: ' + json.commodities[i].name +
+                ' no match found');
+        }
+    }
+    return csvString;
+}
+
+
+function upload24h(res, storageFile, comJson) {
+    var fs = require('fs');
+    if(!fs.existsSync(storageFile)) {
+        res.writeHead(200, {'Content-Type':'text/plain'});
+        res.end('No eddn data available');
+        return;
+    }
+    var readStream = fs.createReadStream(storageFile);
+    
+    var ss = new stream.Readable(); // push data to client here
+    // https://stackoverflow.com/questions/34687387/how-can-i-stream-a-json-array-from-nodejs-to-postgres
+    res.writeHead(200, {'Content-Type': 'application/force-download',
+        'Content-disposition':'attachment; filename=24hdata.csv.gz'});
+    // Create pipe that will stream and gzip data to client
+    // i.e. create data "[{json1{json2}...{jsonN}] or send the csv data.
+    // client then has to unzip the received file.
+    ss.pipe(zlib.createGzip())
+        .pipe(res)
+        .on('finish', () => {
+            LOG('verbose', 'Filestorage data sent');
+            res.end();
+        });
+
+    const ip = res.socket.localAddress;
+    const port = res.socket.localPort;
+    reqCount++;
+    LOG('info', 'Serving 24h json data items' +
+        ' to address ' + ip + 'request number: ' + reqCount);
+    ss.push('id,station_id,commodity_id,supply,supply_bracket,buy_price,sell_price,demand,demand_bracket,collected_at\n');
+    var data;
+    readStream.on('data', chunk => {
+        data += chunk;
+        while(data.indexOf('\n') !== -1) {
+            const line = data.slice(0, data.indexOf('\n'));
+            data = data.substr(data.indexOf('\n') + 1);
+            const json = JSON.parse(line.substring(line.indexOf(':') + 1)).message;
+            const time = new Date(Number(line.split(':',1)));
+            // parse commodities to csv format
+            var csvString = createCsvString(json, comJson);
+            ss.push(csvString);
+        }     
+    });
+    readStream.on('end', () => {
+        ss.push(null); // end of data
+        LOG('verbose', 'All data read from file');
+    });
+
 }
