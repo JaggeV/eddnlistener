@@ -16,6 +16,7 @@ function RemoveLineIf(lineFilt, options) {
         return new RemoveLineIf(lineFilt, options);
     }
     // init Transform
+
     transform.call(this, options);
     this._buff = '';
     this.lineFilt = lineFilt;
@@ -30,11 +31,14 @@ util.inherits(RemoveLineIf, transform);
 var counter=0;
 RemoveLineIf.prototype._transform = function(chunk, encoding, cb) {
     this._buff += chunk.toString();
+
     // check if string has newline symbol, i.e. whole line found
     while(this._buff.indexOf('\n') !== -1) {
+
         var line = this._buff.slice(0, this._buff.indexOf('\n')+1);
         this._buff = this._buff.substr(this._buff.indexOf('\n')+1);
         //only push those lines that the line filter accepts
+
         if(this.lineFilt(line))
         {
             this.push(line);
@@ -44,11 +48,11 @@ RemoveLineIf.prototype._transform = function(chunk, encoding, cb) {
 };
 
 exports.lineFilter = function (inFile, filter, cb) {
-    filter = typeof filter !== 'undefined' ? filter : checkLine;
+    filter = typeof filter !== null ? filter : checkLine;
     var outFile = inFile + '_';
 
     var rs = fs.createReadStream(inFile);
-    
+
     var output = fs.createWriteStream(outFile);
 
     var filter = new RemoveLineIf(filter);
@@ -58,10 +62,9 @@ exports.lineFilter = function (inFile, filter, cb) {
     filter.on('error', handleError);
     output.on('error', handleError);
 
-    output.on('finish', ()=> {
-        fs.unlink(inFile);
-        fs.rename(outFile, inFile);
-    
+    output.on('close', () => {
+        fs.unlinkSync(inFile);
+        fs.renameSync(outFile, inFile);
         cb();
     });
 }
