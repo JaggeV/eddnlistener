@@ -1,5 +1,5 @@
 'use strict';
-var VERSION  = '0.2.0';
+var VERSION  = '0.2.1';
 var zmq      = require('zmq')
   , sock     = zmq.socket('sub')
   , zlib     = require('zlib')
@@ -14,7 +14,7 @@ var zmq      = require('zmq')
 
 winston.configure({
     transports: [
-        new (winston.transports.Console)({level:'debug', colorize: true}),
+        new (winston.transports.Console)({level:'info', colorize: true}),
         new (winston.transports.File)({
             Filename: 'eddn.log',
             dirname: __dirname,
@@ -114,7 +114,7 @@ var purgeStart = null;
 var purgeComplete = false; 
 function jsonFilePurge(jsonFile, cb){
     okToWrite = false;
-    LOG('info', 'Purging old data from: ' + jsonFile);
+    LOG('debug', 'Purging old data from: ' + jsonFile);
     var fs = require('fs');
     //jsonWriter.end();
     purgeStart = new Date().getTime();
@@ -132,7 +132,7 @@ function jsonFilePurge(jsonFile, cb){
 // remove obsolete json strings from file at 10 minute intervals
 const jsonPurgeInterval = setInterval(() =>
                                       jsonFilePurge(jsonStorageFile,
-                                          () => console.log('Timer purge complete')),
+                                                    () => {}),
                                       1000*60*10);
 
 function createWebServer() {
@@ -480,8 +480,8 @@ constantly updated and thus should be quite current. Optimal solution for this p
 would be to use some kind of crontab or similar and download the file every 3h interval\
 so that your data is constantly up to date</p>');
     res.write('<p class="cent" ><a href="elite/3hdata">3hdata</a> ');
-    res.write('<a href="elite/3hdataCSV">3hdataCVS</a> ');
-    res.write('<a href="24hdataCSV">24hdataCSV</a></p>');
+    res.write('<a href="elite/3hdataCSV">3hdataCSV</a> ');
+    res.write('<a href="elite/24hdataCSV">24hdataCSV</a></p>');
     res.write('<div class="footer">');
     res.write('  <p>Please feel free to contact me if you need further \
 support or have improvement ideas, jarkko.vartiainen at googles most \
@@ -646,8 +646,8 @@ function createCsvString(json, comJson) {
             //id is not needed by Trade Dangerous or is set by it -> leave it empty.
             if(json.commodities[i].name.toUpperCase() ===
                comJson[j].name.toUpperCase()){
+                csvString += ',';
                 csvString += stationId + ',';
-                csvString += json.marketId + ',';
                 csvString += comJson[j].id + ',';
                 csvString += json.commodities[i].stock + ',';
                 csvString += json.commodities[i].stockBracket + ',';
