@@ -1,5 +1,5 @@
 'use strict';
-var VERSION  = '0.2.1';
+var VERSION  = '0.2.2';
 var zmq      = require('zmq')
   , sock     = zmq.socket('sub')
   , zlib     = require('zlib')
@@ -9,6 +9,7 @@ var zmq      = require('zmq')
   , url      = require('url')
   , stream   = require('stream')
   , winston  = require('winston')
+  , rstream = require('fs-reverse')
   , lineFilt = require('./lineedit.js')
 ;
 
@@ -35,7 +36,7 @@ const BOT_LIMIT = 1500; //% how many percents can sell/buy price be lower than m
 // define the port where you want this server to run, can be also 80 if you don't have
 // any other (web)service running in that port. E.g. localhost:1185/elite or if port 80,
 // then just localhost/elite to access your server
-const PORT = 1185; 
+const PORT = 1185;
 
 //how long same commodities file is used before new one is downloaded
 //commodities file is used to obtain info about commodity ids.
@@ -372,7 +373,9 @@ function useSchema(rawJson, schema, header, data, comJson) {
         return;
 
     var time = new Date(Date.parse(header.gatewayTimestamp));
-
+    // first check if data already exists in jsons array, delete old if it does
+    jsons.filter(item => data.stationName !== item[1].stationName);
+    
     addJsonToJsons(data, time, comJson, () => {
         LOG('debug', "jsons size %s", jsons.length); 
     
@@ -479,9 +482,9 @@ function displayPage(res) {
 constantly updated and thus should be quite current. Optimal solution for this page\
 would be to use some kind of crontab or similar and download the file every 3h interval\
 so that your data is constantly up to date</p>');
-    res.write('<p class="cent" ><a href="elite/3hdata">3hdata</a> ');
-    res.write('<a href="elite/3hdataCSV">3hdataCSV</a> ');
-    res.write('<a href="elite/24hdataCSV">24hdataCSV</a></p>');
+    res.write('<p class="cent" ><a href="/elite/3hdata">3hdata</a> ');
+    res.write('<a href="/elite/3hdataCSV">3hdataCSV</a> ');
+    res.write('<a href="/elite/24hdataCSV">24hdataCSV</a></p>');
     res.write('<div class="footer">');
     res.write('  <p>Please feel free to contact me if you need further \
 support or have improvement ideas, jarkko.vartiainen at googles most \
@@ -528,7 +531,8 @@ function loadJsonStorage(storageFile, comJson, cb) {
                 // as part of the last token
                 const json = JSON.parse(line.substring(line.indexOf(':') + 1)).message;
                 const time = new Date(Number(line.split(':',1)));
-                
+                if(now.getTime() - time.getTime() > 1000*60*60*3)
+                    continue;
                 addJsonToJsons(json, time, comJson, () =>{});
             }
         }
@@ -551,7 +555,14 @@ function loadJsonStorage(storageFile, comJson, cb) {
 //        comJson = commodities json object, from eddb website
 //         cb     = callback
 function addJsonToJsons(json, time, comJson, cb){
-    var len = Object.keys(json.commodities).length;
+    try {
+        var len = Object.keys(json.commodities).length;
+    }
+    catch(error){
+        LOG('warning', 'Error parsing json: ' + error);
+        cb();    
+        return;
+    }
     // data passed schema validation, lets check values against average prices
 
     var cvsString='';
