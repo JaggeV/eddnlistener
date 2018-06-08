@@ -1,5 +1,5 @@
 'use strict';
-var VERSION  = '0.2.2';
+var VERSION  = '0.2.3';
 var zmq      = require('zmq')
   , sock     = zmq.socket('sub')
   , zlib     = require('zlib')
@@ -9,7 +9,6 @@ var zmq      = require('zmq')
   , url      = require('url')
   , stream   = require('stream')
   , winston  = require('winston')
-  , rstream = require('fs-reverse')
   , lineFilt = require('./lineedit.js')
 ;
 
@@ -62,10 +61,6 @@ var commodities = {time : '', data : ''};
 var stations;
 var stationsHash={};
 
-// this can take some time compared to other files.
-downloadFile(stationUrl, STATIONFILE, handleStationJson, () =>
-            LOG('info', 'Station json downloaded and saved'));
-
 var comfileexists = false;
 
 if (require('fs').existsSync(COMFILE)) {
@@ -85,19 +80,6 @@ function handleComJson(strJson) {
     commodities.data = convertCommodities(commodities.data);
 }
 
-downloadFile(comUrl, COMFILE, handleComJson, () => {
-    jsonFilePurge(jsonStorageFile, () => { // delete old entries
-        loadJsonStorage(jsonStorageFile, commodities.data, () => { // load comdata
-            createWebServer();
-        });
-    });
-}); //if this fails totally, you can download commodities.json
-// into eddn.js directory getCommodities tries to use that file directly.
-
-// try updating commodity.json at COMSEXPIRE interval
-// to force update, just delete commodity.json before running eddn.js
-const intervalObj = setInterval(updateCommodities, COMSEXPIRE);
-
 // write eddn json to storage file
 // This is closed during purge operation and thus needs to be reopened
 // after purge is done.
@@ -108,19 +90,77 @@ jsonWriter.on('error', (error) => {
     LOG('error', 'Failed to writer json to storage file: ' + error);
 });
 
+// Filter for the lineFilter method
+// input: timeStamp in milliseconds, line has to be newer than this or deleted
+class Filter {
+    constructor(timeStamp) {
+        this.timeStamp = timeStamp;
+    }
+    
+    filter(line) {
+        var array = line.split(':');
+        if(array[0] > this.timeStamp){
+            return true;
+        }
+        return false;
+    }
+};
+
+// lets make stuff a bit more synchronized, we need to have comjson and
+// stations.json in memory, before we can parse eddn json traffic
+// (or mainly load that big json storage file into memory)
+// Lets use promises for that
+var stationPromise = new Promise((ok, reject) => {
+    // this can take some time compared to other files.
+    downloadFile(stationUrl, STATIONFILE, handleStationJson, () => {
+        LOG('info', 'Station json downloaded and saved');
+        ok();
+    });
+                
+});
+
+var purgePromise = new Promise((ok, reject) => {
+    jsonFilePurge(jsonStorageFile, () => {
+        ok();
+    });
+});
+
+var comJsonPromise = new Promise((ok, reject) => {
+    downloadFile(comUrl, COMFILE, handleComJson, () => {
+        ok();
+    });
+});
+
+Promise.all([stationPromise, purgePromise, comJsonPromise]).then(() =>{
+    loadJsonStorage(jsonStorageFile, commodities.data, () => createWebServer());
+});
+// downloadFile(comUrl, COMFILE, handleComJson, () => {
+//     jsonFilePurge(jsonStorageFile, () => { // delete old entries
+//         loadJsonStorage(jsonStorageFile, commodities.data, () => { // load comdata
+//             createWebServer();
+//         });
+//     });
+// }); //if this fails totally, you can download commodities.json
+// into eddn.js directory getCommodities tries to use that file directly.
+
+// try updating commodity.json at COMSEXPIRE interval
+// to force update, just delete commodity.json before running eddn.js
+const intervalObj = setInterval(updateCommodities, COMSEXPIRE);
+
 // Delete old lines from json storage file, while the method is run, store the
 // starting timestamp and when the purgin is complete, save the files from 3h
 // buffer to the file, starting from the timestamp.
 var purgeStart = null;
-var purgeComplete = false; 
+var purgeComplete = false;
 function jsonFilePurge(jsonFile, cb){
     okToWrite = false;
     LOG('debug', 'Purging old data from: ' + jsonFile);
     var fs = require('fs');
-    //jsonWriter.end();
+    jsonWriter.end();
     purgeStart = new Date().getTime();
-        
+
     var filt = new Filter(purgeStart - 1000*60*60*24); //delete older than 24h
+
     lineFilt.lineFilter(jsonFile, filt.filter.bind(filt), ()=> {
         LOG('debug', jsonFile + ' purged of old data (>24h)');
         purgeComplete = true;
@@ -350,22 +390,6 @@ function convertCommodities(comJson) {
     return comJson;
 }
 
-// Filter for the lineFilter method
-// input: timeStamp in milliseconds, line has to be newer than this or deleted
-class Filter {
-    constructor(timeStamp) {
-        this.timeStamp = timeStamp;
-    }
-    
-    filter(line) {
-        var array = line.split(':');
-        if(array[0] > this.timeStamp){
-            return true;
-        }
-        return false;
-    }
-}; //class Filter
-
 // uses the downloaded schema and commodities.json to parse eddn jsons.
 function useSchema(rawJson, schema, header, data, comJson) {
     // validate data, i.e. so that all fields are correct
@@ -505,8 +529,9 @@ function validate(json, schema) {
 function loadJsonStorage(storageFile, comJson, cb) {
     LOG('info', 'Loading jsonStorage: ' + storageFile);
     var fs = require('fs');
+    var fsr = require('fs-reverse');
     var now = new Date();
-    var threehAgo = now.getTime() - 1000*60*60*3;
+    var threehAgo = now.getTime() - 1000*60*60*4;
     if(fs.existsSync(storageFile)) {
         var fInfo = fs.statSync(storageFile);
         LOG('verbose', storageFile + ' is created' + fInfo.birthtime);
@@ -514,35 +539,47 @@ function loadJsonStorage(storageFile, comJson, cb) {
 
     jsonWriter.end();
 
-    var rstream = fs.createReadStream(storageFile);
+    var rstream = fsr(storageFile);
 
     var data='';
     okToWrite = false;
     var lineCounter = 0;
 
-    rstream.on('data', chunk => {
-        data += chunk;
-        while(data.indexOf('\n') !== -1) {
-            lineCounter++;
-            const line = data.slice(0, data.indexOf('\n'));
-            data = data.substr(data.indexOf('\n') + 1);
-            if(line.split(':')[0] > threehAgo) {
-                // split will use only first ":" for splitting, rest are considered
-                // as part of the last token
-                const json = JSON.parse(line.substring(line.indexOf(':') + 1)).message;
-                const time = new Date(Number(line.split(':',1)));
-                if(now.getTime() - time.getTime() > 1000*60*60*3)
-                    continue;
-                addJsonToJsons(json, time, comJson, () =>{});
-            }
+    rstream.on('data', line => {
+        lineCounter++;
+        if(line.length === 0)
+           return;
+
+        if(line.split(':')[0] > threehAgo) {
+            // split will use only first ":" for splitting, rest are considered
+            // as part of the last token
+            const time = new Date(Number(line.split(':',1)));
+            const json = JSON.parse(
+                line.substring(line.indexOf(':') + 1)).message;
+            addJsonToJsons(json, time, comJson, () =>{});
+        }
+        else {
+            LOG('debug', 'Reading done, destroy stream');
+            rstream.destroy(); // reading done, destroy stream
+            return;
         }
     });
+
     rstream.on('error', (err) =>
                LOG('error', 'Error reading json storage file: ' +err));
     rstream.on('end', ()=> {
+        var dur = ((new Date()).getTime() - now.getTime()) / 1000;
         LOG('info', 'Data from json storage retreived: ' +
             lineCounter + ' entries read \nof which ' + jsons.length +
-            ' were newer than 3h');
+            ' were newer than 3h. This took ' + dur + 's');
+        okToWrite = true;
+        jsonWriter = fs.createWriteStream(jsonStorageFile, {'flags':'a'});
+        cb();
+    });
+    rstream.on('close', () => {
+        var dur = ((new Date()).getTime() - now.getTime()) / 1000;
+        LOG('info', 'Data from json storage retreived: ' + --lineCounter +
+            ' entries read in ' + dur + 's');
         okToWrite = true;
         jsonWriter = fs.createWriteStream(jsonStorageFile, {'flags':'a'});
         cb();
@@ -564,7 +601,6 @@ function addJsonToJsons(json, time, comJson, cb){
         return;
     }
     // data passed schema validation, lets check values against average prices
-
     var cvsString='';
 
     // check that prices are sane
@@ -592,10 +628,6 @@ function addJsonToJsons(json, time, comJson, cb){
             return;
         }
         // price was ok, lets check the other fields also
-        if(json.marketId === undefined) {
-            LOG('warning', 'marketId undefined, ignoring data');
-            return;
-        }
         if(json.commodities[i].stock === undefined ||
            json.commodities[i].stockBracket === undefined ||
            json.commodities[i].demand === undefined ||
@@ -603,9 +635,8 @@ function addJsonToJsons(json, time, comJson, cb){
             LOG('warning', 'Stock or demand info undefined');
         }
         // all field are at least set,  lets find a match from commodities.json
-        cvsString = createCsvString(json, comJson);
     }
-    
+    cvsString = createCsvString(json, comJson);    
     LOG('silly', 'cvs: \n' + cvsString);
     LOG('debug', '%s - System: %s[%s] commodities: %s',
         time, json.systemName, json.stationName, len);
