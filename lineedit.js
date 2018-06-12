@@ -63,14 +63,19 @@ exports.lineFilter = function (inFile, filter, cb) {
     output.on('error', handleError);
 
     output.on('close', () => {
+        if(!fs.existsSync(outFile)){
+            cb();
+            return;
+        }
         fs.unlinkSync(inFile);
         fs.renameSync(outFile, inFile);
         cb();
     });
-}
+};
 
 function handleError(err) {
     console.log('LineFilter pipes failed: ' + err);
+    cb();
 }
 
 function checkLine(line) {

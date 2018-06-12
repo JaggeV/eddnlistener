@@ -1,5 +1,5 @@
 'use strict';
-var VERSION  = '0.2.3';
+var VERSION  = '0.3.0';
 var zmq      = require('zmq')
   , sock     = zmq.socket('sub')
   , zlib     = require('zlib')
@@ -42,8 +42,10 @@ const PORT = 1185;
 const COMSEXPIRE = 1000*60*60*24*7; //in milliseconds
 const COMFILE = 'commodities.json';
 const STATIONFILE = 'stations.json';
+const SYSTEMFILE = 'systems_populated.json';
 const comUrl = 'https://eddb.io/archive/v5/commodities.json';
 const stationUrl = 'https://eddb.io/archive/v5/stations.json';
+const systemUrl = 'https://eddb.io/archive/v5/systems_populated.json';
 
 var jsons = new Array(); //this variable will store all the received eddn jsons
 // schema files will be buffered after first download, schema1 is old address
@@ -56,10 +58,9 @@ var reqCount = 0;
 
 var jsonStorageFile = __dirname + '/jsonStorage.txt';
 
-
 var commodities = {time : '', data : ''};
-var stations;
-var stationsHash={};
+var stationMap={};
+var systemsMap = {};
 
 var comfileexists = false;
 
@@ -67,10 +68,13 @@ if (require('fs').existsSync(COMFILE)) {
     var fInfo = require('fs').statSync(COMFILE);
     commodities.time = fInfo.birthtime;
 }
+
 function handleStationJson(strJson) {
-    stations = JSON.parse(strJson);
-    for(var i = 0; i < stations.length; i++)
-        stationsHash[stations[i].name]=stations[i];
+    let stations = JSON.parse(strJson);
+    for(var i = 0; i < stations.length; i++){
+        let system = systemsMap[stations[i].system_id].name;
+        stationMap[stations[i].name+'/' + system] = stations[i];
+    }
     LOG('info', 'Station data parsed to json object');
 }
 
@@ -78,6 +82,13 @@ function handleComJson(strJson) {
     commodities.time = new Date();
     commodities.data = JSON.parse(strJson);
     commodities.data = convertCommodities(commodities.data);
+}
+
+function handleSystems(strJson) {
+    let systems = JSON.parse(strJson);
+    for(let i = 0; i < systems.length; i++)
+        systemsMap[systems[i].id] = systems[i];
+    LOG('info', 'Systems data has been loaded into memory');
 }
 
 // write eddn json to storage file
@@ -106,42 +117,72 @@ class Filter {
     }
 };
 
+class DuplicateFilter {
+    constructor(stationNames) {
+        this.stationNames = stationNames;
+    }
+
+    // if stationName can be found from line, return false, thus
+    // leaving the line out from new file
+    filter(line) {
+        line = line.toString();
+        for(let i = 0; i < this.stationNames.length; i++) {
+            let system = this.stationNames[i].slice(
+                this.stationNames[i].indexOf('/')+1);
+            let station = this.stationNames[i].slice(
+                0, this.stationNames[i].indexOf('/'));
+
+            if(line.match(new RegExp(station)) &&
+               line.match(new RegExp(system))) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
 // lets make stuff a bit more synchronized, we need to have comjson and
 // stations.json in memory, before we can parse eddn json traffic
 // (or mainly load that big json storage file into memory)
 // Lets use promises for that
-var stationPromise = new Promise((ok, reject) => {
-    // this can take some time compared to other files.
-    downloadFile(stationUrl, STATIONFILE, handleStationJson, () => {
-        LOG('info', 'Station json downloaded and saved');
-        ok();
-    });
-                
-});
 
-var purgePromise = new Promise((ok, reject) => {
-    jsonFilePurge(jsonStorageFile, () => {
+var systemPromise = new Promise((ok, reject) => {
+    downloadFile(systemUrl, SYSTEMFILE, handleSystems, () => {
         ok();
     });
 });
 
-var comJsonPromise = new Promise((ok, reject) => {
-    downloadFile(comUrl, COMFILE, handleComJson, () => {
-        ok();
+systemPromise.then(()=> {
+    var stationPromise = new Promise((ok, reject) => {
+        // this can take some time compared to other files.
+        downloadFile(stationUrl, STATIONFILE, handleStationJson, () => {
+            ok();
+        });
+        
+    });
+    
+    var purgePromise = new Promise((ok, reject) => {
+        jsonFilePurge(jsonStorageFile, () => {
+            ok();
+        });
+    });
+    
+    var comJsonPromise = new Promise((ok, reject) => {
+        downloadFile(comUrl, COMFILE, handleComJson, () => {
+            ok();
+        });
+    });
+
+    return Promise.all([stationPromise, purgePromise, comJsonPromise]);
+}).catch(err => {
+    LOG('error', 'Failed to download or use systems.json: ' + err);
+    process_exit(1);
+}).then(() =>{
+    loadJsonStorage(jsonStorageFile, commodities.data, () => {
+        okToWrite = true;
+        createWebServer();
     });
 });
-
-Promise.all([stationPromise, purgePromise, comJsonPromise]).then(() =>{
-    loadJsonStorage(jsonStorageFile, commodities.data, () => createWebServer());
-});
-// downloadFile(comUrl, COMFILE, handleComJson, () => {
-//     jsonFilePurge(jsonStorageFile, () => { // delete old entries
-//         loadJsonStorage(jsonStorageFile, commodities.data, () => { // load comdata
-//             createWebServer();
-//         });
-//     });
-// }); //if this fails totally, you can download commodities.json
-// into eddn.js directory getCommodities tries to use that file directly.
 
 // try updating commodity.json at COMSEXPIRE interval
 // to force update, just delete commodity.json before running eddn.js
@@ -156,7 +197,6 @@ function jsonFilePurge(jsonFile, cb){
     okToWrite = false;
     LOG('debug', 'Purging old data from: ' + jsonFile);
     var fs = require('fs');
-    jsonWriter.end();
     purgeStart = new Date().getTime();
 
     var filt = new Filter(purgeStart - 1000*60*60*24); //delete older than 24h
@@ -170,12 +210,37 @@ function jsonFilePurge(jsonFile, cb){
     });
 }
 
+function remDupFromStorage(jsonFile, stationNames, cb) {
+    okToWrite = false;
+    if(stationNames.length === 0){
+        LOG('warning', 'Empty stations for purge!');
+        cb();
+        return;
+    }
+       
+    LOG('debug', 'Purging duplicate for: ' + stationNames +
+        ' from: ' + jsonFile);
+    var fs = require('fs');
+
+    purgeStart = new Date().getTime();
+
+    var filt = new DuplicateFilter(stationNames); 
+
+    lineFilt.lineFilter(jsonFile, filt.filter.bind(filt), ()=> {
+        LOG('debug', jsonFile + ' duplicates removed');
+        purgeComplete = true;
+        LOG('debug', 'opening file...');
+        jsonWriter = fs.createWriteStream(jsonFile, {'flags':'a'});
+        jsonWriter.on('open', () => cb());
+    });
+}
+
 // remove obsolete json strings from file at 10 minute intervals
 const jsonPurgeInterval = setInterval(() =>
                                       jsonFilePurge(jsonStorageFile,
                                                     () => {}),
                                       1000*60*10);
-
+// Create the actual web server which will serve web pages and data
 function createWebServer() {
     LOG('info', 'Creating web server');
     var server = http.createServer(function (req, res) {
@@ -238,6 +303,7 @@ function createWebServer() {
     });
     server.listen(PORT).on('error', error => {
         LOG('error', 'Port ' + PORT +' is already in use, maybe eddn is running?');
+        LOG('error', error);
         process.exit(1);
     });
     LOG('info', "server listening on " + PORT);
@@ -366,7 +432,7 @@ function updateCommodities() {
 // this method will convert commodities.json commodities names to names
 // that eddn network provides, .e.g. Narcotics become BasicNarcotics etc...
 function convertCommodities(comJson) {
-    // todo: get rid of these hard coded conersions and use
+    // todo: get rid of these hard coded conversions and use
     // some automatic method.
     for(var j = 0; j < comJson.length; j++){
         comJson[j].name = comJson[j].name.replace(/\s|-/g,'');
@@ -398,7 +464,9 @@ function useSchema(rawJson, schema, header, data, comJson) {
 
     var time = new Date(Date.parse(header.gatewayTimestamp));
     // first check if data already exists in jsons array, delete old if it does
-    jsons.filter(item => data.stationName !== item[1].stationName);
+    jsons = jsons.filter(item => {
+        return data.stationName !== item[1].stationName && data.systemName !== item[1].systemName;
+    });
     
     addJsonToJsons(data, time, comJson, () => {
         LOG('debug', "jsons size %s", jsons.length); 
@@ -411,23 +479,32 @@ function useSchema(rawJson, schema, header, data, comJson) {
         LOG('debug', 'removed old items from memory: ' + count);
         
         if(okToWrite) {
-            LOG('debug', 'Writing json to storage file');
-            jsonWriter.write(time.getTime() + ':' + JSON.stringify(rawJson)
-                             + '\n');
+            let toRemove = data.stationName+'/'+data.systemName;
+            remDupFromStorage(jsonStorageFile, [toRemove], () => {
+                LOG('debug', 'Writing json to storage file');
+                jsonWriter.write(time.getTime() + ':' + JSON.stringify(rawJson)
+                                 + '\n');
+            });
         }
         else if(purgeComplete) {
-            var now = new Date();
+            let now = new Date();
             LOG('debug', 'Purge done, emptying buffer to json storage.' +
                 ' Purge took: ' + (now - purgeStart)/1000 + 's');
-            var i = jsons.length - 1;
-            
-            while(jsons[i][0] > Date.parse(purgeStart) && i > 0)
+            let i = jsons.length - 1;
+
+            let toRemove = new Array();
+            while(jsons[i][0] > Date.parse(purgeStart) && i > 0) {
+                toRemove.push(jsons[i][1].stationName + '/' +
+                              jsons[i][1].systemName);
                 i--;
-            while(i < jsons.length) {
-                jsonWriter.write(jsons[i][0] + ':' +
-                                 JSON.stringify(jsons[i][1]) + '\n');
-                i++;
             }
+            remDupFromStorage(jsonStorageFile, toRemove, () => {
+                while(i < jsons.length) {
+                    jsonWriter.write(jsons[i][0] + ':' +
+                                     JSON.stringify(jsons[i][1]) + '\n');
+                    i++;
+                }
+            });
             purgeComplete = false; // we are ready for next purge round
             purgeStart = null;
             okToWrite = true;
@@ -531,10 +608,15 @@ function loadJsonStorage(storageFile, comJson, cb) {
     var fs = require('fs');
     var fsr = require('fs-reverse');
     var now = new Date();
-    var threehAgo = now.getTime() - 1000*60*60*4;
+    var threehAgo = now.getTime() - 1000*60*60*3;
     if(fs.existsSync(storageFile)) {
         var fInfo = fs.statSync(storageFile);
         LOG('verbose', storageFile + ' is created' + fInfo.birthtime);
+        if(fInfo.size === 0) {
+            LOG('info', 'Storagefile was empty, maybe old data was purged and nothing remains');
+            cb();
+            return;
+        }
     }
 
     jsonWriter.end();
@@ -559,7 +641,7 @@ function loadJsonStorage(storageFile, comJson, cb) {
             addJsonToJsons(json, time, comJson, () =>{});
         }
         else {
-            LOG('debug', 'Reading done, destroy stream');
+            LOG('info', 'Reading done, destroy stream');
             rstream.destroy(); // reading done, destroy stream
             return;
         }
@@ -572,16 +654,12 @@ function loadJsonStorage(storageFile, comJson, cb) {
         LOG('info', 'Data from json storage retreived: ' +
             lineCounter + ' entries read \nof which ' + jsons.length +
             ' were newer than 3h. This took ' + dur + 's');
-        okToWrite = true;
-        jsonWriter = fs.createWriteStream(jsonStorageFile, {'flags':'a'});
-        cb();
+        
     });
     rstream.on('close', () => {
         var dur = ((new Date()).getTime() - now.getTime()) / 1000;
         LOG('info', 'Data from json storage retreived: ' + --lineCounter +
             ' entries read in ' + dur + 's');
-        okToWrite = true;
-        jsonWriter = fs.createWriteStream(jsonStorageFile, {'flags':'a'});
         cb();
     });
 }
@@ -676,7 +754,8 @@ function createCsvString(json, comJson) {
     var found = false;
     var stationId = matchStation(json);
     if(stationId === null) {
-        LOG('warning', 'No id found for station: ' + json.stationName);
+        LOG('warning', 'No id found for station: ' + json.stationName + '/' +
+            json.systemName);
         stationId='';
     }
     
@@ -748,8 +827,8 @@ function upload24h(res, storageFile, comJson) {
 //        id    = ID number of the station where sell data was collected or
 //                null if no match is found
 function matchStation(json){
-    if(json.stationName in stationsHash)
-        return stationsHash[json.stationName].id;
+    if(json.stationName+'/'+json.systemName in stationMap)
+        return stationMap[json.stationName+'/'+json.systemName].id;
     return null;
 }
 
@@ -772,8 +851,11 @@ function xform (comJson) {
                     this.push(line + '\n'); // first linei is the header line
                 }
                 else {
-                    const json = JSON.parse(line.substring(line.indexOf(':') + 1)).message;
+                    var json = JSON.parse(line.substring(line.indexOf(':') + 1));
                     // parse commodities to csv format
+                    if(json.commodities === undefined){
+                        json=json.message; 
+                    }
                     var csvString = createCsvString(json, _comJson);
                     this.push(csvString);
                 }
