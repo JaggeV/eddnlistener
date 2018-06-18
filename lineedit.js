@@ -44,7 +44,7 @@ RemoveLineIf.prototype._transform = function(chunk, encoding, cb) {
             this.push(line);
         }
     }
-    cb();
+    cb(null);
 };
 
 exports.lineFilter = function (inFile, filter, cb) {
@@ -58,24 +58,26 @@ exports.lineFilter = function (inFile, filter, cb) {
     var filter = new RemoveLineIf(filter);
     rs.pipe(filter).pipe(output);
 
-    rs.on('error', handleError);
-    filter.on('error', handleError);
-    output.on('error', handleError);
+    rs.on('error', err => handleError(err, cb).bind(this));
+    filter.on('error', err => handleError(err, cb).bind(this));
+    output.on('error', err=> handleError(err, cb).bind(this));
 
     output.on('close', () => {
         if(!fs.existsSync(outFile)){
-            cb();
+            cb(null);
             return;
         }
         fs.unlinkSync(inFile);
         fs.renameSync(outFile, inFile);
-        cb();
+        cb(null);
     });
 };
 
-function handleError(err) {
+function handleError(err, cb) {
+    rs.unpipe(filter).unpipe(output);
+    output.end();
     console.log('LineFilter pipes failed: ' + err);
-    cb();
+    cb(err);
 }
 
 function checkLine(line) {

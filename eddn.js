@@ -1,5 +1,5 @@
 'use strict';
-var VERSION  = '0.3.0';
+var VERSION  = '0.3.1';
 var zmq      = require('zmq')
   , sock     = zmq.socket('sub')
   , zlib     = require('zlib')
@@ -19,6 +19,8 @@ winston.configure({
             Filename: 'eddn.log',
             dirname: __dirname,
             level: 'verbose',
+            timestamp: true,
+            json: false,
             maxsize: 10000000,
             maxFiles: 3
         })
@@ -100,6 +102,7 @@ var jsonWriter = require('fs').createWriteStream(jsonStorageFile, {'flags':'a'})
 jsonWriter.on('error', (error) => {
     LOG('error', 'Failed to writer json to storage file: ' + error);
 });
+jsonWriter.on('close', () => LOG('debug', 'Initial writer handle closed') );
 
 // Filter for the lineFilter method
 // input: timeStamp in milliseconds, line has to be newer than this or deleted
@@ -198,15 +201,22 @@ function jsonFilePurge(jsonFile, cb){
     LOG('debug', 'Purging old data from: ' + jsonFile);
     var fs = require('fs');
     purgeStart = new Date().getTime();
-
+    
     var filt = new Filter(purgeStart - 1000*60*60*24); //delete older than 24h
-
-    lineFilt.lineFilter(jsonFile, filt.filter.bind(filt), ()=> {
-        LOG('debug', jsonFile + ' purged of old data (>24h)');
+    jsonWriter.end();
+    lineFilt.lineFilter(jsonFile, filt.filter.bind(filt), (err)=> {
+        if(err)
+            LOG('error', 'Linefilter failed: ' + err);
+        else 
+            LOG('debug', jsonFile + ' purged of old data (>24h)');
         purgeComplete = true;
         LOG('debug', 'opening file...');
         jsonWriter = fs.createWriteStream(jsonFile, {'flags':'a'});
         jsonWriter.on('open', () => cb());
+        jsonWriter.on('error', err => {
+            LOG('error', 'Linefilt failed to write due to: ' + err);
+        });
+        jsonWriter.on('close', () => LOG('debug', 'Post purge jsonfile close'));
     });
 }
 
@@ -217,6 +227,7 @@ function remDupFromStorage(jsonFile, stationNames, cb) {
         cb();
         return;
     }
+    jsonWriter.end();
        
     LOG('debug', 'Purging duplicate for: ' + stationNames +
         ' from: ' + jsonFile);
@@ -232,6 +243,12 @@ function remDupFromStorage(jsonFile, stationNames, cb) {
         LOG('debug', 'opening file...');
         jsonWriter = fs.createWriteStream(jsonFile, {'flags':'a'});
         jsonWriter.on('open', () => cb());
+        jsonWriter.on('error', err => {
+            LOG('error', 'Failed to write ' + jsonFile +
+                ' due to ' + err);
+            cb();
+        });
+        jsonWriter.on('close', () => LOG('silly', 'remDupClose writer'));
     });
 }
 
@@ -358,8 +375,9 @@ function downloadFile(dlUrl, storageFile, dlDataHandler, cb) {
                 if(err) {
                     LOG('error', 'Failed to open ' +storageFile + 'due to ' + err);
                     fs.unlink(storageFile, (err) => downloadFile(
-                        dlUrl, storageFile, dlDataHandler,  () => {}));
-                    cb();
+                        dlUrl, storageFile, dlDataHandler,  () => {
+                            cb();
+                        }));
                 }
                 if(data === 'undefined')
                 {
@@ -375,7 +393,8 @@ function downloadFile(dlUrl, storageFile, dlDataHandler, cb) {
             // existing file is too old
             fs.unlink(storageFile, (err) => {
                 downloadFile(dlUrl, storageFile, dlDataHandler, () =>{
-                    cb();});
+                    cb();
+                });
             });            
         }
     }
@@ -498,16 +517,18 @@ function useSchema(rawJson, schema, header, data, comJson) {
                               jsons[i][1].systemName);
                 i--;
             }
+            let tmp = '';
             remDupFromStorage(jsonStorageFile, toRemove, () => {
                 while(i < jsons.length) {
-                    jsonWriter.write(jsons[i][0] + ':' +
-                                     JSON.stringify(jsons[i][1]) + '\n');
-                    i++;
+                    tmp += jsons[i][0] + ':' + JSON.stringify(jsons[i][1]) + '\n';
+                     i++;
                 }
+                jsonWriter.write(tmp, () => {
+                    purgeComplete = false; // we are ready for next purge round
+                    purgeStart = null;
+                    okToWrite = true;
+                });
             });
-            purgeComplete = false; // we are ready for next purge round
-            purgeStart = null;
-            okToWrite = true;
         }    
     });
 }
@@ -654,7 +675,6 @@ function loadJsonStorage(storageFile, comJson, cb) {
         LOG('info', 'Data from json storage retreived: ' +
             lineCounter + ' entries read \nof which ' + jsons.length +
             ' were newer than 3h. This took ' + dur + 's');
-        
     });
     rstream.on('close', () => {
         var dur = ((new Date()).getTime() - now.getTime()) / 1000;
@@ -816,6 +836,7 @@ function upload24h(res, storageFile, comJson) {
         LOG('verbose', 'All data read from file');
     });
     readStream.on('error', (err) => LOG('error', 'Failed to read 24h data from disk: ' + err));
+    readStream.on('close', () => LOG('debug', '24h readstream closed'));
 }
 
 // Function will try to find station matching the incoming eddn station.
