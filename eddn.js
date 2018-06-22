@@ -1,5 +1,5 @@
 'use strict';
-var VERSION  = '0.3.1';
+var VERSION  = '0.3.2';
 var zmq      = require('zmq')
   , sock     = zmq.socket('sub')
   , zlib     = require('zlib')
@@ -203,7 +203,7 @@ function jsonFilePurge(jsonFile, cb){
     purgeStart = new Date().getTime();
     
     var filt = new Filter(purgeStart - 1000*60*60*24); //delete older than 24h
-    jsonWriter.end();
+
     lineFilt.lineFilter(jsonFile, filt.filter.bind(filt), (err)=> {
         if(err)
             LOG('error', 'Linefilter failed: ' + err);
@@ -227,8 +227,6 @@ function remDupFromStorage(jsonFile, stationNames, cb) {
         cb();
         return;
     }
-    jsonWriter.end();
-       
     LOG('debug', 'Purging duplicate for: ' + stationNames +
         ' from: ' + jsonFile);
     var fs = require('fs');
@@ -240,15 +238,6 @@ function remDupFromStorage(jsonFile, stationNames, cb) {
     lineFilt.lineFilter(jsonFile, filt.filter.bind(filt), ()=> {
         LOG('debug', jsonFile + ' duplicates removed');
         purgeComplete = true;
-        LOG('debug', 'opening file...');
-        jsonWriter = fs.createWriteStream(jsonFile, {'flags':'a'});
-        jsonWriter.on('open', () => cb());
-        jsonWriter.on('error', err => {
-            LOG('error', 'Failed to write ' + jsonFile +
-                ' due to ' + err);
-            cb();
-        });
-        jsonWriter.on('close', () => LOG('silly', 'remDupClose writer'));
     });
 }
 
@@ -477,6 +466,7 @@ function convertCommodities(comJson) {
 
 // uses the downloaded schema and commodities.json to parse eddn jsons.
 function useSchema(rawJson, schema, header, data, comJson) {
+    var fs = require('fs');
     // validate data, i.e. so that all fields are correct
     if(!validate(rawJson, schema))
         return;
@@ -501,8 +491,16 @@ function useSchema(rawJson, schema, header, data, comJson) {
             let toRemove = data.stationName+'/'+data.systemName;
             remDupFromStorage(jsonStorageFile, [toRemove], () => {
                 LOG('debug', 'Writing json to storage file');
+                LOG('debug', 'opening file...');
+                jsonWriter = fs.createWriteStream(jsonStorageFile, {'flags':'a'});
+                jsonWriter.on('error', err => {
+                    LOG('error', 'Failed to write ' + jsonFile +
+                        ' due to ' + err);
+                    return;
+                });
+                jsonWriter.on('close', () => LOG('silly', 'remDupClose writer'));
                 jsonWriter.write(time.getTime() + ':' + JSON.stringify(rawJson)
-                                 + '\n');
+                                 + '\n', () => jsonWriter.end());
             });
         }
         else if(purgeComplete) {
@@ -523,10 +521,19 @@ function useSchema(rawJson, schema, header, data, comJson) {
                     tmp += jsons[i][0] + ':' + JSON.stringify(jsons[i][1]) + '\n';
                      i++;
                 }
+                LOG('debug', 'opening file...');
+                jsonWriter = fs.createWriteStream(jsonStorageFile, {'flags':'a'});
+                jsonWriter.on('error', err => {
+                    LOG('error', 'Failed to write ' + jsonFile +
+                        ' due to ' + err);
+                    return;
+                });
+                jsonWriter.on('close', () => LOG('silly', 'remDupClose writer'));
                 jsonWriter.write(tmp, () => {
                     purgeComplete = false; // we are ready for next purge round
                     purgeStart = null;
                     okToWrite = true;
+                    jsonWriter.end();
                 });
             });
         }    
@@ -639,8 +646,6 @@ function loadJsonStorage(storageFile, comJson, cb) {
             return;
         }
     }
-
-    jsonWriter.end();
 
     var rstream = fsr(storageFile);
 
